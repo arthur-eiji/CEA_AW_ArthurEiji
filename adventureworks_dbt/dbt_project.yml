@@ -1,0 +1,31 @@
+name: 'adventureworks'
+version: '1.0.0'
+config-version: 2
+
+# Perfil definido em ~/.dbt/profiles.yml (ver profiles.example.yml)
+profile: 'adventureworks'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+vars:
+  # Valor auditado das vendas brutas de 2011 (pedido do Carlos, CEO).
+  # Usado pelo teste de dado singular tests/assert_gross_sales_2011.sql
+  gross_sales_2011_expected: 12646112.16
+
+models:
+  adventureworks:
+    # Camada de staging: 1 view por tabela-fonte, limpeza leve + rename para snake_case.
+    staging:
+      +materialized: view
+    # Camada de marts (dimensional): tabelas materializadas para performance no BI.
+    marts:
+      +materialized: table

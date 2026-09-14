@@ -1,0 +1,181 @@
+version: 2
+
+sources:
+  - name: adventure_works
+    description: >
+      Dados brutos do ERP transacional (PostgreSQL AdventureWorks OLTP) ingeridos
+      no Databricks pelo processo de EL da Indicium. Todos os 68 objetos das áreas
+      (sales, production, person, humanresources, purchasing) foram carregados no
+      schema único `adventure_works`, com o nome físico prefixado pelo schema de
+      origem (ex.: `sales_salesorderheader`, `person_address`).
+    # Catálogo (Unity Catalog) onde a ingestão criou o schema adventure_works.
+    database: fea_academy
+    schema: adventure_works
+
+    # Convenção: `name` = nome lógico usado no source() dos modelos;
+    #            `identifier` = nome físico da tabela no Databricks.
+    tables:
+      # ---------------------------------------------------------------- SALES
+      - name: salesorderheader
+        identifier: sales_salesorderheader
+        description: Cabeçalho do pedido de venda (1 linha por pedido).
+        columns:
+          - name: salesorderid
+            description: Chave primária do pedido.
+            tests: [not_null, unique]
+          - name: customerid
+            description: FK para customer.
+            tests:
+              - not_null
+              - relationships:
+                  to: source('adventure_works', 'customer')
+                  field: customerid
+          - name: orderdate
+            description: Data do pedido (usada como data de venda).
+            tests: [not_null]
+          - name: status
+            description: Status do pedido (1..6).
+            tests:
+              - not_null
+              - accepted_values:
+                  values: [1, 2, 3, 4, 5, 6]
+
+      - name: salesorderdetail
+        identifier: sales_salesorderdetail
+        description: Linhas de item do pedido (grão da tabela fato).
+        columns:
+          - name: salesorderdetailid
+            description: Chave primária da linha de pedido.
+            tests: [not_null, unique]
+          - name: salesorderid
+            description: FK para o cabeçalho do pedido.
+            tests:
+              - not_null
+              - relationships:
+                  to: source('adventure_works', 'salesorderheader')
+                  field: salesorderid
+          - name: productid
+            description: FK para product.
+            tests:
+              - not_null
+              - relationships:
+                  to: source('adventure_works', 'product')
+                  field: productid
+          - name: orderqty
+            description: Quantidade comprada na linha.
+            tests: [not_null]
+          - name: unitprice
+            description: Preço unitário negociado.
+            tests: [not_null]
+
+      - name: customer
+        identifier: sales_customer
+        description: Clientes (pessoa física via personid ou loja via storeid).
+        columns:
+          - name: customerid
+            tests: [not_null, unique]
+
+      - name: store
+        identifier: sales_store
+        description: Lojas/revendedores (nome dos clientes do tipo Store).
+        columns:
+          - name: businessentityid
+            tests: [not_null, unique]
+          - name: name
+            tests: [not_null]
+
+      - name: creditcard
+        identifier: sales_creditcard
+        description: Cartões de crédito usados nos pedidos.
+        columns:
+          - name: creditcardid
+            tests: [not_null, unique]
+          - name: cardtype
+            description: Tipo/bandeira do cartão.
+            tests: [not_null]
+
+      - name: salesreason
+        identifier: sales_salesreason
+        description: Motivos de venda (Promotion, Price, Manufacturer, etc.).
+        columns:
+          - name: salesreasonid
+            tests: [not_null, unique]
+          - name: name
+            tests: [not_null]
+
+      - name: salesorderheadersalesreason
+        identifier: sales_salesorderheadersalesreason
+        description: Ponte M:N entre pedidos e motivos de venda.
+        columns:
+          - name: salesorderid
+            tests: [not_null]
+          - name: salesreasonid
+            tests: [not_null]
+
+      # ------------------------------------------------------------ PRODUCTION
+      - name: product
+        identifier: production_product
+        description: Catálogo de produtos.
+        columns:
+          - name: productid
+            tests: [not_null, unique]
+          - name: name
+            tests: [not_null]
+
+      - name: productsubcategory
+        identifier: production_productsubcategory
+        description: Subcategorias de produto.
+        columns:
+          - name: productsubcategoryid
+            tests: [not_null, unique]
+
+      - name: productcategory
+        identifier: production_productcategory
+        description: Categorias de produto.
+        columns:
+          - name: productcategoryid
+            tests: [not_null, unique]
+
+      # ---------------------------------------------------------------- PERSON
+      - name: person
+        identifier: person_person
+        description: Pessoas (nomes de clientes e vendedores).
+        columns:
+          - name: businessentityid
+            tests: [not_null, unique]
+
+      - name: address
+        identifier: person_address
+        description: Endereços (cidade).
+        columns:
+          - name: addressid
+            tests: [not_null, unique]
+          - name: stateprovinceid
+            tests: [not_null]
+
+      - name: stateprovince
+        identifier: person_stateprovince
+        description: Estados/províncias.
+        columns:
+          - name: stateprovinceid
+            tests: [not_null, unique]
+          - name: countryregioncode
+            tests: [not_null]
+
+      - name: countryregion
+        identifier: person_countryregion
+        description: >
+          Países/regiões. ACHADO DE QUALIDADE: a ingestão trouxe 1 linha com
+          countryregioncode NULO (no OLTP original é PK, nunca nulo). Causa provável:
+          o código "NA" (Namíbia) foi interpretado como nulo na leitura do CSV.
+          O teste fica como WARN para documentar o defeito na fonte; a correção
+          é feita na staging (stg_adventure_works__country_region).
+        columns:
+          - name: countryregioncode
+            tests:
+              - unique
+              - not_null:
+                  config:
+                    severity: warn
+          - name: name
+            tests: [not_null]

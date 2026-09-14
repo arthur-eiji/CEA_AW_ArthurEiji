@@ -1,0 +1,339 @@
+version: 2
+
+models:
+  # =========================================================== FATO
+  - name: fct_sales
+    description: >
+      Tabela fato de vendas no grão de item de pedido (salesorderdetail).
+      Cada linha representa um produto vendido dentro de um pedido, com as
+      chaves estrangeiras para as dimensões conformadas e as medidas de venda.
+      A contagem de pedidos é feita como count(distinct sales_order_id).
+    columns:
+      - name: sales_order_detail_id
+        description: Chave primária do fato — identifica unicamente a linha de item do pedido.
+        tests:
+          - not_null
+          - unique
+      - name: sales_order_id
+        description: Degenerate dimension. Identificador do pedido, usado para contar pedidos distintos.
+        tests:
+          - not_null
+      - name: product_key
+        description: FK para dim_product.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_product')
+              field: product_key
+      - name: customer_key
+        description: FK para dim_customer.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_key
+      - name: credit_card_key
+        description: FK para dim_credit_card (chave -1 = pedido sem cartão).
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_credit_card')
+              field: credit_card_key
+      - name: order_status_key
+        description: FK para dim_order_status.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_order_status')
+              field: order_status_key
+      - name: order_date_key
+        description: FK para dim_date (data do pedido).
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_key
+      - name: ship_geography_key
+        description: FK para dim_geography (endereço de entrega — cidade/estado/país).
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_geography')
+              field: geography_key
+      - name: order_date
+        description: Data do pedido (degenerate, para séries temporais diretas).
+        tests:
+          - not_null
+      - name: order_qty
+        description: Quantidade comprada do produto na linha (soma = "quantidade comprada").
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: unit_price
+        description: Preço unitário negociado.
+        tests:
+          - not_null
+      - name: unit_price_discount
+        description: Percentual de desconto aplicado ao item (0 a 1).
+      - name: gross_amount
+        description: >
+          Valor total negociado (bruto) = unit_price * order_qty. É a medida
+          "vendas brutas" reconciliada com a auditoria (ver teste de dado).
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: discount_amount
+        description: Valor do desconto do item = unit_price * order_qty * unit_price_discount.
+      - name: net_amount
+        description: >
+          Valor total negociado líquido = unit_price * order_qty * (1 - unit_price_discount).
+          Equivale ao linetotal computado do OLTP original (coluna inexistente no port PostgreSQL).
+
+  # =========================================================== DIMENSÕES
+  - name: dim_product
+    description: Dimensão de produto, enriquecida com subcategoria e categoria.
+    columns:
+      - name: product_key
+        description: Chave primária (surrogate) da dimensão de produto.
+        tests:
+          - not_null
+          - unique
+      - name: product_id
+        description: Chave natural do produto (OLTP).
+        tests:
+          - not_null
+          - unique
+      - name: product_name
+        description: Nome do produto (dimensão "Produto").
+        tests:
+          - not_null
+      - name: product_number
+        description: Código do produto no OLTP.
+      - name: color
+        description: Cor do produto.
+      - name: product_line
+        description: Linha do produto (R/M/T/S).
+      - name: subcategory_name
+        description: Subcategoria do produto.
+      - name: category_name
+        description: Categoria do produto (Bikes, Components, Clothing, Accessories).
+      - name: standard_cost
+        description: Custo padrão.
+      - name: list_price
+        description: Preço de tabela.
+
+  - name: dim_customer
+    description: Dimensão de cliente (pessoa física via person, ou loja via store).
+    columns:
+      - name: customer_key
+        description: Chave primária (surrogate) da dimensão de cliente.
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        description: Chave natural do cliente (OLTP).
+        tests:
+          - not_null
+          - unique
+      - name: customer_type
+        description: Tipo do cliente — 'Individual' ou 'Store'.
+        tests:
+          - accepted_values:
+              values: ['Individual', 'Store']
+      - name: customer_name
+        description: >
+          Nome do cliente (dimensão "Cliente"): pessoa física (person.Name) ou,
+          para revendedores, o nome da loja (sales_store.name).
+      - name: first_name
+        description: Primeiro nome.
+      - name: last_name
+        description: Sobrenome.
+      - name: territory_id
+        description: Território de vendas do cliente.
+
+  - name: dim_credit_card
+    description: Dimensão de cartão de crédito (tipo/bandeira). Inclui membro 'N/A' (chave -1).
+    columns:
+      - name: credit_card_key
+        description: Chave primária (surrogate) da dimensão de cartão.
+        tests:
+          - not_null
+          - unique
+      - name: credit_card_id
+        description: Chave natural do cartão (-1 = desconhecido).
+        tests:
+          - not_null
+          - unique
+      - name: card_type
+        description: Tipo do cartão (dimensão "Tipo de cartão").
+        tests:
+          - not_null
+
+  - name: dim_sales_reason
+    description: Dimensão de motivo de venda (Promotion, Price, etc.).
+    columns:
+      - name: sales_reason_key
+        description: Chave primária (surrogate) da dimensão de motivo de venda.
+        tests:
+          - not_null
+          - unique
+      - name: sales_reason_id
+        description: Chave natural do motivo de venda (OLTP).
+        tests:
+          - not_null
+          - unique
+      - name: sales_reason_name
+        description: Nome do motivo de venda (dimensão "Motivo de venda").
+        tests:
+          - not_null
+      - name: reason_type
+        description: Categoria do motivo (Marketing, Other, etc.).
+
+  - name: dim_order_status
+    description: Dimensão derivada que decodifica o status numérico do pedido.
+    columns:
+      - name: order_status_key
+        description: Chave primária (surrogate) da dimensão de status.
+        tests:
+          - not_null
+          - unique
+      - name: status_code
+        description: Código numérico do status (1..6).
+        tests:
+          - not_null
+          - unique
+      - name: status_name
+        description: Rótulo legível do status (dimensão "Status").
+        tests:
+          - not_null
+
+  - name: dim_geography
+    description: >
+      Dimensão de geografia (endereço → estado → país). Grão = endereço.
+      Fornece cidade, estado e país para as análises de vendas.
+    columns:
+      - name: geography_key
+        description: Chave primária (surrogate) da dimensão de geografia.
+        tests:
+          - not_null
+          - unique
+      - name: address_id
+        description: Chave natural do endereço (OLTP).
+        tests:
+          - not_null
+          - unique
+      - name: city
+        description: Cidade (dimensão "Cidade").
+      - name: state_province_name
+        description: Estado/província (dimensão "Estado").
+      - name: country_region_name
+        description: País/região (dimensão "País").
+
+  - name: dim_date
+    description: Dimensão de calendário gerada, cobrindo 2011-01-01 a 2014-12-31.
+    columns:
+      - name: date_key
+        description: Chave primária (surrogate) da dimensão de data.
+        tests:
+          - not_null
+          - unique
+      - name: date_day
+        description: Data (dia). Dimensão "Data de venda".
+        tests:
+          - not_null
+          - unique
+      - name: year_number
+        description: Ano.
+      - name: quarter_number
+        description: Trimestre (1..4).
+      - name: month_number
+        description: Mês (1..12).
+      - name: month_name
+        description: Nome do mês.
+      - name: year_month
+        description: Ano-mês (yyyy-MM), útil para séries temporais.
+
+  # =========================================================== PONTE
+  - name: br_order_sales_reason
+    description: >
+      Tabela-ponte M:N entre pedidos e motivos de venda. Usar no BI apenas ao
+      filtrar/agrupar por motivo de venda (join com fct_sales por sales_order_id).
+    columns:
+      - name: sales_order_id
+        description: FK para o pedido (fct_sales.sales_order_id).
+        tests:
+          - not_null
+      - name: sales_reason_key
+        description: FK para dim_sales_reason.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_sales_reason')
+              field: sales_reason_key
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - sales_order_id
+            - sales_reason_key
+
+  # =========================================================== REPORTING (BI)
+  - name: rpt_sales
+    description: >
+      Tabela larga (one big table) para o BI, no grão de item de pedido, com a fato
+      já unida a todas as dimensões. Totais EXATOS (sem fan-out): reconcilia com a
+      auditoria. O motivo de venda aparece só como lista concatenada informativa
+      (sales_reasons); para análises por motivo use rpt_sales_by_reason.
+    columns:
+      - name: sales_order_detail_id
+        description: Chave primária (item de pedido).
+        tests: [not_null, unique]
+      - name: sales_order_id
+        description: Identificador do pedido (count distinct = nº de pedidos).
+        tests: [not_null]
+      - name: order_date
+        description: Data do pedido.
+      - name: year_month
+        description: Ano-mês (yyyy-MM) para séries temporais.
+      - name: product_name
+        description: Produto.
+      - name: category_name
+        description: Categoria do produto.
+      - name: customer_name
+        description: Cliente (pessoa física ou nome da loja revendedora).
+      - name: card_type
+        description: Tipo de cartão (N/A = sem cartão).
+      - name: status_name
+        description: Status do pedido.
+      - name: city
+        description: Cidade de entrega.
+      - name: state_province_name
+        description: Estado de entrega.
+      - name: country_region_name
+        description: País de entrega.
+      - name: sales_reasons
+        description: Lista concatenada dos motivos de venda do pedido (informativo).
+      - name: gross_amount
+        description: Valor total negociado (bruto).
+        tests: [not_null]
+      - name: net_amount
+        description: Valor total negociado líquido (bruto − desconto).
+
+  - name: rpt_sales_by_reason
+    description: >
+      Grão item de pedido × motivo de venda. Um pedido com N motivos gera N linhas
+      (fan-out intencional). Usar apenas para análises POR motivo ou FILTRADAS por
+      motivo (ex.: item 4f). Não somar totais sem filtrar por motivo.
+    columns:
+      - name: sales_reason_name
+        description: Motivo de venda (Promotion, Price, Manufacturer, ...).
+        tests: [not_null]
+      - name: sales_order_detail_id
+        description: Item de pedido.
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - sales_order_detail_id
+            - sales_reason_name

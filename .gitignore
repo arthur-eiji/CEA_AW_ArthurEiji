@@ -1,0 +1,17 @@
+# Ambiente de validação local (não faz parte da entrega)
+.venv/
+
+# Artefatos do dbt
+**/target/
+**/dbt_packages/
+**/logs/
+**/package-lock.yml
+
+# Segredos
+**/profiles.yml
+.env
+
+# SO / editor
+.DS_Store
+*.pyc
+__pycache__/

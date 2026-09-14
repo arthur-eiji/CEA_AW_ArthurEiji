@@ -1,0 +1,28 @@
+# -----------------------------------------------------------------------------
+# COPIE este conteúdo para ~/.dbt/profiles.yml e preencha os campos < ... >.
+# Feito para o Databricks FREE EDITION (grátis, sem cartão de crédito).
+# NÃO comite o profiles.yml — ele fica fora do repositório.
+# -----------------------------------------------------------------------------
+adventureworks:
+  target: dev
+  outputs:
+    dev:
+      type: databricks
+
+      # SQL Warehouses > "Serverless Starter Warehouse" > aba "Connection details"
+      host: <SEU_HOST>.cloud.databricks.com          # campo "Server hostname" (sem https://)
+      http_path: /sql/1.0/warehouses/<ID>            # campo "HTTP path"
+
+      catalog: fea_academy                           # mesmo catálogo onde está o adventure_works
+      schema: dbt_arthur                             # o dbt CRIA esse schema p/ os modelos
+      # (se der erro de permissão ao criar o schema, troque o catalog para `workspace`)
+      threads: 4
+
+      # ---------------- Autenticação: escolha UMA das opções ----------------
+      # Opção A (recomendada no Free Edition): OAuth pelo navegador, sem token.
+      # No 1º `dbt debug` abre uma aba pedindo login no Databricks e pronto.
+      auth_type: oauth
+
+      # Opção B: Personal Access Token (só se Settings > Developer > Access tokens
+      # existir na sua conta). Comente a linha `auth_type` acima e descomente:
+      # token: "{{ env_var('DBT_DATABRICKS_TOKEN') }}"

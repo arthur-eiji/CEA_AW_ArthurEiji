@@ -139,9 +139,17 @@ arredonda a 2 casas e falha se divergir do valor auditado (parametrizado na var
 
 ## 5. Como o modelo responde às perguntas de negócio (item 4)
 
-O painel (Databricks AI/BI Dashboards) consome as tabelas de reporting `rpt_sales` e
-`rpt_sales_by_reason`; as queries de resposta estão em `analyses/q4a…q4f.sql` e o passo a
-passo do painel em `docs/guia_dashboard_databricks.md`. Todas descem do grão da `fct_sales`
+**Painel interativo (público):** <https://arthur-eiji.github.io/CEA_AW_ArthurEiji/>
+
+O painel é uma aplicação web estática versionada junto com o código (`docs/index.html`,
+publicada via GitHub Pages) e construída sobre a mart `rpt_sales`: o script
+`scripts/build_dashboard_data.py` compacta o export da mart (24 MB) em um JSON
+dicionário-codificado (`docs/data/sales.json`, 4,6 MB), e a página agrega os 121 mil itens
+de pedido no navegador. Decisões de BI-as-code: sem dependência de licença ou de
+compartilhamento, filtros numa única linha acima de todos os gráficos, um eixo por gráfico
+(a série mensal vira três gráficos pequenos), uma cor por série, versão em tabela de todo
+gráfico (acessibilidade), modo escuro e selo de reconciliação com a auditoria calculado ao vivo.
+As queries SQL equivalentes a cada pergunta estão em `analyses/q4a…q4f.sql`. Todas descem do grão da `fct_sales`
 + dimensões conformadas:
 
 - **4a** nº pedidos / qtd / valor por produto, cartão, motivo, data, cliente, status, cidade/estado/país → `fct_sales` × todas as dims (motivo via ponte).
@@ -173,4 +181,18 @@ adventureworks_dbt/
 └── tests/
     ├── assert_gross_sales_2011.sql         # teste de dado (US$ 12.646.112,16)
     └── assert_rpt_sales_no_fanout.sql      # rpt_sales == fct_sales (linhas e total)
+```
+
+Na raiz do repositório:
+
+```
+CEA_AW_ArthurEiji/
+├── adventureworks_dbt/          # este projeto dbt
+├── docs/
+│   ├── index.html               # painel de BI (GitHub Pages)
+│   ├── data/sales.json          # dados compactados da mart rpt_sales
+│   ├── modelo_conceitual_dw.pdf # diagrama conceitual (+ .drawio editável)
+│   └── roteiro_video.md         # roteiro da apresentação
+├── scripts/build_dashboard_data.py
+└── entrega/                     # pasta de entrega (links + PDF)
 ```

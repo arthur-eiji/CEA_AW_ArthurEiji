@@ -1,0 +1,5 @@
+Painel de BI interativo (público, GitHub Pages):
+https://arthur-eiji.github.io/CEA_AW_ArthurEiji/
+
+Página 1 "Visão Geral": perguntas 4a, 4b, 4c, 4d, 4e.
+Página 2 "Motivo de Venda": pergunta 4f (motivo "On Promotion").

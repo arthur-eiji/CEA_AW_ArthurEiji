@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adventure Works — Painel de Vendas</title>
+<meta name="description" content="Painel interativo de vendas da Adventure Works, construído sobre o data warehouse dimensional (Databricks + dbt).">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+  /* ---------- tokens (paleta de referência validada; modo escuro = passos próprios) ---------- */
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb; --plane: #f9f9f7;
+    --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10);
+    --s1: #2a78d6; --s2: #eb6834; --deemph: #c3c2b7;
+    --good: #0ca30c; --good-text: #006300;
+    --accent-wash: rgba(42,120,214,.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface: #1a1a19; --plane: #0d0d0d;
+      --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+      --s1: #3987e5; --s2: #d95926; --deemph: #52514e;
+      --good: #0ca30c; --good-text: #0ca30c;
+      --accent-wash: rgba(57,135,229,.12);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface: #1a1a19; --plane: #0d0d0d;
+    --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+    --s1: #3987e5; --s2: #d95926; --deemph: #52514e;
+    --good: #0ca30c; --good-text: #0ca30c;
+    --accent-wash: rgba(57,135,229,.12);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--plane); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 14px; line-height: 1.4; }
+  a { color: var(--s1); }
+  button { font: inherit; }
+
+  .wrap { max-width: 1440px; margin: 0 auto; padding: 20px 20px 48px; }
+
+  /* ---------- cabeçalho ---------- */
+  header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  header h1 { font-size: 22px; font-weight: 650; margin: 0 0 4px; letter-spacing: -.01em; }
+  header .sub { color: var(--ink2); font-size: 13px; }
+  .tabs { display: flex; gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 4px; }
+  .tabs button { border: 0; background: transparent; color: var(--ink2); padding: 8px 14px; border-radius: 7px; cursor: pointer; font-weight: 600; }
+  .tabs button[aria-selected="true"] { background: var(--accent-wash); color: var(--ink); }
+  .theme { border: 1px solid var(--border); background: var(--surface); color: var(--ink2); border-radius: 8px; padding: 7px 10px; cursor: pointer; }
+
+  /* ---------- filtros (uma linha, acima de tudo) ---------- */
+  .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin-bottom: 16px; position: relative; z-index: 5; }
+  .filters .lbl { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; margin-right: 4px; }
+  .filters select { border: 1px solid var(--border); background: var(--plane); color: var(--ink); border-radius: 8px; padding: 7px 8px; }
+  .ms { position: relative; }
+  .ms > button { border: 1px solid var(--border); background: var(--plane); color: var(--ink); border-radius: 8px; padding: 7px 10px; cursor: pointer; white-space: nowrap; }
+  .ms > button.on { border-color: var(--s1); background: var(--accent-wash); }
+  .ms .panel { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; width: 300px; max-height: 380px; display: flex; flex-direction: column;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.18); padding: 8px; }
+  .ms .panel input { border: 1px solid var(--border); background: var(--plane); color: var(--ink); border-radius: 8px; padding: 7px 9px; margin-bottom: 6px; }
+  .ms .list { overflow: auto; flex: 1; }
+  .ms .list label { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
+  .ms .list label:hover { background: var(--accent-wash); }
+  .ms .list .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .ms .foot { display: flex; justify-content: space-between; gap: 8px; padding-top: 6px; border-top: 1px solid var(--grid); margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .ms .foot button { border: 0; background: transparent; color: var(--s1); cursor: pointer; font-weight: 600; }
+  .clear { border: 0; background: transparent; color: var(--s1); cursor: pointer; font-weight: 600; margin-left: auto; }
+
+  /* ---------- KPIs ---------- */
+  .kpis { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; margin-bottom: 16px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; grid-column: span 2; min-width: 0; }
+  .tile.hero { grid-column: span 4; }
+  .tile .l { color: var(--ink2); font-size: 12px; font-weight: 600; }
+  .tile .v { font-size: clamp(20px, 1.9vw, 26px); font-weight: 650; margin-top: 4px; letter-spacing: -.01em; overflow-wrap: anywhere; }
+  .tile.hero .v { font-size: clamp(28px, 3.4vw, 48px); line-height: 1.05; }
+  figcaption .t { min-width: 0; }
+  figcaption .s { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .tile .d { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; color: var(--good-text); font-weight: 600; font-size: 12px; margin-top: 6px; }
+  .badge::before { content: "✓"; display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--good); color: #fff; font-size: 11px; }
+
+  /* ---------- cards de gráfico ---------- */
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+  figure.card { margin: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 14px 8px; grid-column: span 6; min-width: 0; }
+  figure.card.c4 { grid-column: span 4; }
+  figure.card.c12 { grid-column: span 12; }
+  figcaption { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  figcaption .t { font-weight: 650; font-size: 14px; }
+  figcaption .s { color: var(--muted); font-size: 12px; }
+  figcaption .tbl { margin-left: auto; border: 1px solid var(--border); background: transparent; color: var(--ink2); border-radius: 7px; padding: 3px 9px; cursor: pointer; font-size: 12px; }
+  figcaption .tbl[aria-pressed="true"] { background: var(--accent-wash); color: var(--ink); }
+  .plot { width: 100%; min-height: 160px; }
+  .tableview { overflow: auto; max-height: 420px; }
+  table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.data th, table.data td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+  table.data th { color: var(--ink2); font-weight: 600; position: sticky; top: 0; background: var(--surface); }
+  table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .note { grid-column: span 12; background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--s1); border-radius: 12px; padding: 12px 16px; color: var(--ink2); font-size: 13px; }
+  .answer { grid-column: span 12; background: var(--accent-wash); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; font-size: 16px; }
+  .answer b { color: var(--ink); }
+  .reasonbar { grid-column: span 12; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .reasonbar select { border: 1px solid var(--border); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 7px 9px; font-weight: 600; }
+
+  footer { margin-top: 28px; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  #status { padding: 40px; text-align: center; color: var(--ink2); }
+  [hidden] { display: none !important; }
+
+  @media (max-width: 1100px) { .tile { grid-column: span 4; } .tile.hero { grid-column: span 6; } figure.card, figure.card.c4 { grid-column: span 12; } }
+  @media (max-width: 640px) { .tile, .tile.hero { grid-column: span 12; } .tile.hero .v { font-size: 36px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Adventure Works — Painel de Vendas</h1>
+      <div class="sub" id="subtitle">Carregando o data warehouse…</div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center">
+      <div class="tabs" role="tablist" aria-label="Páginas">
+        <button role="tab" aria-selected="true" data-page="overview">Visão Geral</button>
+        <button role="tab" aria-selected="false" data-page="reasons">Motivo de Venda</button>
+      </div>
+      <button class="theme" id="themeBtn" title="Tema claro / escuro / automático">◐ Tema</button>
+    </div>
+  </header>
+
+  <div id="status">Carregando dados (≈ 4 MB)…</div>
+
+  <div id="app" hidden>
+    <!-- ---------- filtros: uma linha, data primeiro ---------- -->
+    <div class="filters" id="filters">
+      <span class="lbl">Período</span>
+      <select id="monthFrom" aria-label="Mês inicial"></select>
+      <span style="color:var(--muted)">até</span>
+      <select id="monthTo" aria-label="Mês final"></select>
+      <span id="msHost" style="display:contents"></span>
+      <button class="clear" id="clearBtn" type="button">Limpar filtros</button>
+    </div>
+
+    <!-- ========================= PÁGINA 1: VISÃO GERAL ========================= -->
+    <section id="page-overview" role="tabpanel">
+      <div class="kpis" id="kpis"></div>
+
+      <div class="grid">
+        <figure class="card c4" data-card="m_gross">
+          <figcaption><div class="t">Valor total negociado por mês</div><div class="s">US$ bruto</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card c4" data-card="m_orders">
+          <figcaption><div class="t">Número de pedidos por mês</div><div class="s">pedidos distintos</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card c4" data-card="m_qty">
+          <figcaption><div class="t">Quantidade comprada por mês</div><div class="s">unidades</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+
+        <figure class="card c4" data-card="by_cat">
+          <figcaption><div class="t">Valor por categoria</div><div class="s">US$ bruto</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card c4" data-card="by_card">
+          <figcaption><div class="t">Valor por tipo de cartão</div><div class="s">US$ bruto · N/A = pedido sem cartão</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card c4" data-card="by_ctype">
+          <figcaption><div class="t">Valor por tipo de cliente</div><div class="s">US$ bruto</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+
+        <figure class="card" data-card="by_country">
+          <figcaption><div class="t">Valor por país</div><div class="s">US$ bruto · país de entrega</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card" data-card="top_city">
+          <figcaption><div class="t">Top 5 cidades por valor negociado</div><div class="s">US$ bruto</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+
+        <figure class="card" data-card="top_cust">
+          <figcaption><div class="t">Top 10 clientes por valor negociado</div><div class="s">US$ bruto</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card" data-card="top_prod">
+          <figcaption><div class="t">Top 15 produtos por valor negociado</div><div class="s">US$ bruto</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+
+        <figure class="card" data-card="ticket_prod">
+          <figcaption><div class="t">Top 15 produtos por ticket médio</div><div class="s">(bruto − descontos) ÷ nº de pedidos</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card" data-card="by_status">
+          <figcaption><div class="t">Pedidos por status</div><div class="s">todos os pedidos do ERP estão com status Shipped</div></figcaption>
+          <div class="tableview"></div>
+        </figure>
+      </div>
+    </section>
+
+    <!-- ========================= PÁGINA 2: MOTIVO DE VENDA ========================= -->
+    <section id="page-reasons" role="tabpanel" hidden>
+      <div class="grid">
+        <div class="note">
+          <b>Como ler esta página.</b> Motivo de venda é uma relação <b>muitos-para-muitos</b> com o pedido (um pedido pode ter vários motivos), por isso fica fora da tabela fato e entra pela ponte <code>br_order_sales_reason</code>.
+          Nos gráficos "por motivo", um pedido com mais de um motivo é contado em <i>cada</i> motivo — então as barras não somam o total da Visão Geral. Ao escolher <i>um</i> motivo, cada pedido conta uma única vez e os números são exatos.
+          <span id="noReason"></span>
+        </div>
+
+        <figure class="card c4" data-card="r_gross">
+          <figcaption><div class="t">Valor negociado por motivo</div><div class="s">US$ bruto</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card c4" data-card="r_qty">
+          <figcaption><div class="t">Quantidade comprada por motivo</div><div class="s">unidades</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card c4" data-card="r_orders">
+          <figcaption><div class="t">Número de pedidos por motivo</div><div class="s">pedidos distintos</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+
+        <div class="reasonbar">
+          <span class="lbl" style="color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Analisar o motivo</span>
+          <select id="reasonSel" aria-label="Motivo de venda"></select>
+        </div>
+        <div class="answer" id="answer"></div>
+
+        <figure class="card c12" data-card="rp_qty">
+          <figcaption><div class="t" id="rpTitle">Produtos com maior quantidade comprada no motivo</div><div class="s">unidades · o 1º lugar em destaque</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card" data-card="rp_cust">
+          <figcaption><div class="t">Top 10 clientes no motivo</div><div class="s">US$ bruto</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+        <figure class="card" data-card="rp_city">
+          <figcaption><div class="t">Top 5 cidades no motivo</div><div class="s">US$ bruto</div><button class="tbl" type="button" aria-pressed="false">Tabela</button></figcaption>
+          <div class="plot"></div><div class="tableview" hidden></div>
+        </figure>
+      </div>
+    </section>
+
+    <footer id="footer"></footer>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* =============================== utilidades =============================== */
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
+const fmtInt = v => Math.round(v).toLocaleString('pt-BR');
+const fmtMoney = v => 'US$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtMoneyShort = v => {
+  const a = Math.abs(v);
+  if (a >= 1e6) return 'US$ ' + (v / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 2 }) + ' M';
+  if (a >= 1e3) return 'US$ ' + (v / 1e3).toLocaleString('pt-BR', { maximumFractionDigits: 0 }) + ' mil';
+  return 'US$ ' + v.toLocaleString('pt-BR', { maximumFractionDigits: 0 });
+};
+const fmtIntShort = v => {
+  const a = Math.abs(v);
+  if (a >= 1e6) return (v / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 2 }) + ' M';
+  if (a >= 1e4) return (v / 1e3).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' mil';
+  return fmtInt(v);
+};
+const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const trunc = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+const MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+const monthLabel = ym => MESES[+ym.slice(5, 7) - 1] + '/' + ym.slice(2, 4);
+const hexToRgba = (hex, a) => {
+  const h = hex.replace('#', '');
+  const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+};
+const tokens = () => {
+  const cs = getComputedStyle(document.documentElement);
+  const g = n => cs.getPropertyValue(n).trim();
+  return { surface: g('--surface'), ink: g('--ink'), ink2: g('--ink2'), muted: g('--muted'), grid: g('--grid'), axis: g('--axis'), s1: g('--s1'), deemph: g('--deemph') };
+};
+const CFG = { displayModeBar: false, responsive: true };
+
+/* =============================== estado =============================== */
+let D = null;           // dataset bruto (dicionário-codificado)
+let X = null;           // derivados
+let page = 'overview';
+const F = { monthFrom: 0, monthTo: 0, country: new Set(), state: new Set(), city: new Set(), category: new Set(), subcategory: new Set(), product: new Set(), card: new Set(), status: new Set(), customer: new Set(), ctype: new Set(), reason: 0 };
+const CARDS = {};       // id -> {fig, plot, table, rows, cols, draw}
+
+/* =============================== carga =============================== */
+async function load() {
+  const res = await fetch('data/sales.json', { cache: 'no-cache' });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  D = await res.json();
+  derive();
+  buildFilters();
+  wireUi();
+  $('#status').hidden = true;
+  $('#app').hidden = false;
+  renderAll();
+}
+
+function derive() {
+  const nO = D.orders.length;
+  const months = Array.from(new Set(D.dates.map(d => d.slice(0, 7)))).sort();
+  const monthIdx = new Map(months.map((m, i) => [m, i]));
+  const dateMonth = D.dates.map(d => monthIdx.get(d.slice(0, 7)));
+  const orderMonth = new Int16Array(nO), orderYear = new Int16Array(nO);
+  for (let o = 0; o < nO; o++) { const di = D.orders[o][0]; orderMonth[o] = dateMonth[di]; orderYear[o] = +D.dates[di].slice(0, 4); }
+  const geoCity = D.geos.map(g => g[0]), geoState = D.geos.map(g => g[1]), geoCountry = D.geos.map(g => g[2]);
+  const custType = D.customers.map(c => c[1]);
+  const prodCat = D.products.map(p => p[2]), prodSub = D.products.map(p => p[1]);
+  X = { nO, months, orderMonth, orderYear, geoCity, geoState, geoCountry, custType, prodCat, prodSub };
+  F.monthFrom = 0; F.monthTo = months.length - 1;
+  const ri = D.reasons.findIndex(r => /promotion/i.test(r));
+  F.reason = ri >= 0 ? ri : 0;
+}
+
+/* =============================== filtros =============================== */
+function orderPass(o, except) {
+  const r = D.orders[o];
+  const m = X.orderMonth[o];
+  if (m < F.monthFrom || m > F.monthTo) return false;
+  const g = r[5];
+  if (except !== 'country' && F.country.size && !F.country.has(X.geoCountry[g])) return false;
+  if (except !== 'state' && F.state.size && !F.state.has(X.geoState[g])) return false;
+  if (except !== 'city' && F.city.size && !F.city.has(g)) return false;
+  if (except !== 'card' && F.card.size && !F.card.has(r[3])) return false;
+  if (except !== 'status' && F.status.size && !F.status.has(r[4])) return false;
+  if (except !== 'customer' && F.customer.size && !F.customer.has(r[2])) return false;
+  if (except !== 'ctype' && F.ctype.size && !F.ctype.has(X.custType[r[2]])) return false;
+  return true;
+}
+function productPass(p, except) {
+  if (except !== 'category' && F.category.size && !F.category.has(X.prodCat[p])) return false;
+  if (except !== 'subcategory' && F.subcategory.size && !F.subcategory.has(X.prodSub[p])) return false;
+  if (except !== 'product' && F.product.size && !F.product.has(p)) return false;
+  return true;
+}
+function masks(except) {
+  const oOK = new Uint8Array(X.nO), pOK = new Uint8Array(D.products.length);
+  for (let o = 0; o < X.nO; o++) oOK[o] = orderPass(o, except) ? 1 : 0;
+  for (let p = 0; p < pOK.length; p++) pOK[p] = productPass(p, except) ? 1 : 0;
+  return { oOK, pOK };
+}
+
+// definição dos filtros de dimensão (chave -> rótulo); contagens calculadas ao abrir (lazy)
+const FILTER_DEFS = [
+  { key: 'country', label: 'País', keyOf: (o, p) => X.geoCountry[D.orders[o][5]], name: k => D.countries[k] },
+  { key: 'state', label: 'Estado', keyOf: (o, p) => X.geoState[D.orders[o][5]], name: k => D.states[k] },
+  { key: 'city', label: 'Cidade', keyOf: (o, p) => D.orders[o][5], name: k => X.geoCity[k] + ' · ' + D.states[X.geoState[k]] },
+  { key: 'category', label: 'Categoria', keyOf: (o, p) => X.prodCat[p], name: k => D.categories[k] },
+  { key: 'subcategory', label: 'Subcategoria', keyOf: (o, p) => X.prodSub[p], name: k => D.subcategories[k] },
+  { key: 'product', label: 'Produto', keyOf: (o, p) => p, name: k => D.products[k][0] },
+  { key: 'card', label: 'Tipo de cartão', keyOf: (o, p) => D.orders[o][3], name: k => D.card_types[k] },
+  { key: 'status', label: 'Status', keyOf: (o, p) => D.orders[o][4], name: k => D.statuses[k] },
+  { key: 'customer', label: 'Cliente', keyOf: (o, p) => D.orders[o][2], name: k => D.customers[k][0] },
+  { key: 'ctype', label: 'Tipo de cliente', keyOf: (o, p) => X.custType[D.orders[o][2]], name: k => D.customer_types[k] },
+];
+
+function optionsFor(def) {
+  const { oOK, pOK } = masks(def.key);
+  const counts = new Map();
+  for (const L of D.lines) {
+    if (!oOK[L[0]] || !pOK[L[1]]) continue;
+    const k = def.keyOf(L[0], L[1]);
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  const sel = F[def.key];
+  const opts = Array.from(counts, ([id, n]) => ({ id, n, label: def.name(id) }));
+  // garante que seleções atuais apareçam mesmo sem linhas
+  for (const id of sel) if (!counts.has(id)) opts.push({ id, n: 0, label: def.name(id) });
+  opts.sort((a, b) => (sel.has(b.id) - sel.has(a.id)) || a.label.localeCompare(b.label, 'pt-BR'));
+  return opts;
+}
+
+class MultiSelect {
+  constructor(host, def) {
+    this.def = def; this.sel = F[def.key];
+    this.root = document.createElement('div'); this.root.className = 'ms';
+    this.btn = document.createElement('button'); this.btn.type = 'button';
+    this.root.appendChild(this.btn); host.appendChild(this.root);
+    this.btn.addEventListener('click', () => this.panel ? this.close() : this.open());
+    this.refreshBtn();
+  }
+  refreshBtn() {
+    this.btn.textContent = this.def.label + ': ' + (this.sel.size ? this.sel.size + ' sel.' : 'Todos') + ' ▾';
+    this.btn.classList.toggle('on', this.sel.size > 0);
+  }
+  open() {
+    closeAllPanels();
+    const panel = document.createElement('div'); panel.className = 'panel';
+    const inp = document.createElement('input'); inp.type = 'search'; inp.placeholder = 'Buscar ' + this.def.label.toLowerCase() + '…';
+    const list = document.createElement('div'); list.className = 'list';
+    const foot = document.createElement('div'); foot.className = 'foot';
+    const info = document.createElement('span');
+    const clear = document.createElement('button'); clear.type = 'button'; clear.textContent = 'Limpar';
+    foot.append(info, clear); panel.append(inp, list, foot); this.root.appendChild(panel); this.panel = panel;
+    const opts = optionsFor(this.def);
+    const draw = () => {
+      const q = norm(inp.value.trim());
+      const shown = (q ? opts.filter(o => norm(o.label).includes(q)) : opts).slice(0, 300);
+      list.replaceChildren();
+      for (const o of shown) {
+        const lab = document.createElement('label');
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = this.sel.has(o.id);
+        cb.addEventListener('change', () => { cb.checked ? this.sel.add(o.id) : this.sel.delete(o.id); this.refreshBtn(); renderAll(); });
+        const name = document.createElement('span'); name.textContent = o.label;
+        const n = document.createElement('span'); n.className = 'n'; n.textContent = fmtInt(o.n);
+        lab.append(cb, name, n); list.appendChild(lab);
+      }
+      info.textContent = opts.length > shown.length ? `${shown.length} de ${fmtInt(opts.length)} — digite para refinar` : `${opts.length} opções`;
+    };
+    inp.addEventListener('input', draw); draw(); inp.focus();
+    clear.addEventListener('click', () => { this.sel.clear(); this.refreshBtn(); draw(); renderAll(); });
+  }
+  close() { if (this.panel) { this.panel.remove(); this.panel = null; } }
+}
+const MS = [];
+function closeAllPanels() { MS.forEach(m => m.close()); }
+document.addEventListener('click', e => { if (!e.target.closest('.ms')) closeAllPanels(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAllPanels(); });
+
+function buildFilters() {
+  const from = $('#monthFrom'), to = $('#monthTo');
+  X.months.forEach((m, i) => {
+    from.add(new Option(monthLabel(m), i)); to.add(new Option(monthLabel(m), i));
+  });
+  from.value = 0; to.value = X.months.length - 1;
+  from.addEventListener('change', () => { F.monthFrom = +from.value; if (F.monthTo < F.monthFrom) { F.monthTo = F.monthFrom; to.value = F.monthTo; } renderAll(); });
+  to.addEventListener('change', () => { F.monthTo = +to.value; if (F.monthFrom > F.monthTo) { F.monthFrom = F.monthTo; from.value = F.monthFrom; } renderAll(); });
+  const host = $('#msHost');
+  for (const def of FILTER_DEFS) MS.push(new MultiSelect(host, def));
+  $('#clearBtn').addEventListener('click', () => {
+    for (const def of FILTER_DEFS) F[def.key].clear();
+    F.monthFrom = 0; F.monthTo = X.months.length - 1; from.value = 0; to.value = F.monthTo;
+    MS.forEach(m => m.refreshBtn()); renderAll();
+  });
+  const rs = $('#reasonSel');
+  D.reasons.forEach((r, i) => rs.add(new Option(r.replace(/\s+/g, ' '), i)));
+  rs.value = F.reason;
+  rs.addEventListener('change', () => { F.reason = +rs.value; renderAll(); });
+}
+
+function wireUi() {
+  $$('.tabs button').forEach(b => b.addEventListener('click', () => {
+    page = b.dataset.page;
+    $$('.tabs button').forEach(x => x.setAttribute('aria-selected', x === b));
+    $('#page-overview').hidden = page !== 'overview';
+    $('#page-reasons').hidden = page !== 'reasons';
+    renderAll();
+  }));
+  for (const fig of $$('figure.card')) {
+    const id = fig.dataset.card;
+    CARDS[id] = { fig, plot: $('.plot', fig), table: $('.tableview', fig), rows: null, cols: null, draw: null, view: 'chart' };
+    const b = $('.tbl', fig);
+    if (b) b.addEventListener('click', () => {
+      const c = CARDS[id]; c.view = c.view === 'chart' ? 'table' : 'chart';
+      b.setAttribute('aria-pressed', c.view === 'table'); b.textContent = c.view === 'table' ? 'Gráfico' : 'Tabela';
+      paintCard(id);
+    });
+  }
+  // tema: auto -> claro -> escuro
+  const order = ['auto', 'light', 'dark']; let ti = 0;
+  $('#themeBtn').addEventListener('click', () => {
+    ti = (ti + 1) % 3; const t = order[ti];
+    if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t);
+    $('#themeBtn').textContent = '◐ Tema: ' + ({ auto: 'auto', light: 'claro', dark: 'escuro' })[t];
+    renderAll();
+  });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderAll);
+  window.addEventListener('resize', () => { clearTimeout(window.__rt); window.__rt = setTimeout(() => $$('.plot').forEach(p => p.children.length && Plotly.Plots.resize(p)), 120); });
+}
+
+/* =============================== agregação =============================== */
+function aggregate(oOK, pOK) {
+  const nO = X.nO, nP = D.products.length, nM = X.months.length;
+  const seen = new Uint8Array(nO);
+  const tot = { orders: 0, qty: 0, gross: 0, net: 0 };
+  const mG = new Float64Array(nM), mQ = new Float64Array(nM), mO = new Float64Array(nM);
+  const cat = new Float64Array(D.categories.length), card = new Float64Array(D.card_types.length), ctype = new Float64Array(D.customer_types.length);
+  const country = new Float64Array(D.countries.length), geo = new Float64Array(D.geos.length), cust = new Float64Array(D.customers.length);
+  const pG = new Float64Array(nP), pQ = new Float64Array(nP), pN = new Float64Array(nP), pO = new Float64Array(nP);
+  const statusO = new Float64Array(D.statuses.length);
+  const pSeen = new Set();
+  for (const L of D.lines) {
+    const o = L[0], p = L[1];
+    if (!oOK[o] || !pOK[p]) continue;
+    const r = D.orders[o], q = L[2], g = L[3], n = L[4], m = X.orderMonth[o];
+    tot.qty += q; tot.gross += g; tot.net += n;
+    if (!seen[o]) { seen[o] = 1; tot.orders++; mO[m]++; statusO[r[4]]++; }
+    mG[m] += g; mQ[m] += q;
+    cat[X.prodCat[p]] += g; card[r[3]] += g; ctype[X.custType[r[2]]] += g;
+    country[X.geoCountry[r[5]]] += g; geo[r[5]] += g; cust[r[2]] += g;
+    pG[p] += g; pQ[p] += q; pN[p] += n;
+    const k = p * nO + o; if (!pSeen.has(k)) { pSeen.add(k); pO[p]++; }
+  }
+  return { tot, mG, mQ, mO, cat, card, ctype, country, geo, cust, pG, pQ, pN, pO, statusO };
+}
+function aggregateReasons(oOK, pOK) {
+  const nR = D.reasons.length, nO = X.nO;
+  const g = new Float64Array(nR), q = new Float64Array(nR), ord = new Float64Array(nR);
+  const seen = new Uint8Array(nR * nO), seenO = new Uint8Array(nO);
+  let ordersTotal = 0, ordersNoReason = 0;
+  for (const L of D.lines) {
+    const o = L[0], p = L[1];
+    if (!oOK[o] || !pOK[p]) continue;
+    const mask = D.orders[o][6];
+    if (!seenO[o]) { seenO[o] = 1; ordersTotal++; if (!mask) ordersNoReason++; }
+    if (!mask) continue;
+    for (let b = 0; b < nR; b++) if (mask & (1 << b)) {
+      g[b] += L[3]; q[b] += L[2];
+      if (!seen[b * nO + o]) { seen[b * nO + o] = 1; ord[b]++; }
+    }
+  }
+  return { g, q, ord, ordersTotal, ordersNoReason };
+}
+const topN = (arr, n, name) => {
+  const out = [];
+  for (let i = 0; i < arr.length; i++) if (arr[i] > 0) out.push({ i, value: arr[i] });
+  out.sort((a, b) => b.value - a.value);
+  return out.slice(0, n).map(r => ({ i: r.i, label: name(r.i), value: r.value }));
+};
+
+/* =============================== desenho =============================== */
+function axis(t) { return { gridcolor: t.grid, zerolinecolor: t.axis, linecolor: t.axis, tickfont: { color: t.muted, size: 11 }, automargin: true, fixedrange: true }; }
+function baseLayout(t, extra) {
+  return Object.assign({
+    paper_bgcolor: t.surface, plot_bgcolor: t.surface,
+    font: { family: 'system-ui, -apple-system, "Segoe UI", sans-serif', size: 12, color: t.ink2 },
+    margin: { l: 8, r: 16, t: 8, b: 32 }, separators: ',.', showlegend: false, dragmode: false,
+    hoverlabel: { bgcolor: t.surface, bordercolor: t.axis, font: { color: t.ink, size: 12 } },
+    xaxis: axis(t), yaxis: axis(t),
+  }, extra);
+}
+
+// barras horizontais (ranking / nominal): uma série, uma cor; ênfase opcional no 1º
+function hbar(el, t, rows, o) {
+  const colors = o.emphasize ? rows.map((_, i) => (i === 0 ? t.s1 : t.deemph)) : t.s1;
+  const data = [{
+    type: 'bar', orientation: 'h',
+    x: rows.map(r => r.value), y: rows.map(r => trunc(r.label, 34)),
+    customdata: rows.map(r => [r.label, o.fmt(r.value), r.sub || '']),
+    marker: { color: colors, cornerradius: 4 },
+    text: rows.map(r => o.short(r.value)), textposition: 'outside', textfont: { color: t.ink2, size: 11 }, cliponaxis: false,
+    hovertemplate: '<b>%{customdata[1]}</b><br>%{customdata[0]}<br><span style="color:' + t.muted + '">%{customdata[2]}</span><extra></extra>',
+  }];
+  const layout = baseLayout(t, {
+    height: Math.max(150, rows.length * 32 + 36), margin: { l: 8, r: 84, t: 4, b: 24 }, bargap: 0.4,
+    xaxis: Object.assign(axis(t), { showgrid: true, zeroline: false, showticklabels: false, rangemode: 'tozero' }),
+    yaxis: Object.assign(axis(t), { autorange: 'reversed', showgrid: false, tickfont: { color: t.ink2, size: 12 } }),
+  });
+  Plotly.react(el, data, layout, CFG);
+}
+// série mensal: linha 2px + marcadores 8px com anel de superfície + lavagem de área 10%
+function line(el, t, labels, ys, o) {
+  const step = labels.length > 24 ? 6 : labels.length > 12 ? 3 : 1;
+  const data = [{
+    type: 'scatter', mode: 'lines+markers', x: labels, y: ys,
+    line: { color: t.s1, width: 2, shape: 'linear' },
+    marker: { size: 8, color: t.s1, line: { color: t.surface, width: 2 } },
+    fill: 'tozeroy', fillcolor: hexToRgba(t.s1, 0.10),
+    hovertemplate: '<b>' + o.prefix + '%{y:,.' + o.dec + 'f}</b><extra></extra>',
+  }];
+  const layout = baseLayout(t, {
+    height: 230, margin: { l: 8, r: 16, t: 8, b: 32 }, hovermode: 'x unified',
+    xaxis: Object.assign(axis(t), { type: 'category', showgrid: false, tickvals: labels.filter((_, i) => i % step === 0), tickangle: 0 }),
+    yaxis: Object.assign(axis(t), { showgrid: true, zeroline: false, rangemode: 'tozero', tickformat: '~s', tickprefix: o.tickprefix || '' }),
+  });
+  Plotly.react(el, data, layout, CFG);
+}
+function tableHtml(container, rows, cols) {
+  const tbl = document.createElement('table'); tbl.className = 'data';
+  const thead = tbl.createTHead(); const trh = thead.insertRow();
+  for (const c of cols) { const th = document.createElement('th'); th.textContent = c.label; if (c.num) th.className = 'num'; trh.appendChild(th); }
+  const tb = tbl.createTBody();
+  for (const r of rows) {
+    const tr = tb.insertRow();
+    for (const c of cols) { const td = tr.insertCell(); td.textContent = c.fmt ? c.fmt(r[c.key]) : r[c.key]; if (c.num) td.className = 'num'; }
+  }
+  container.replaceChildren(tbl);
+}
+function setCard(id, rows, cols, draw) {
+  const c = CARDS[id]; if (!c) return;
+  c.rows = rows; c.cols = cols; c.draw = draw; paintCard(id);
+}
+function paintCard(id) {
+  const c = CARDS[id]; if (!c || !c.rows) return;
+  const asTable = c.view === 'table' || !c.draw;
+  if (c.plot) c.plot.hidden = asTable;
+  c.table.hidden = !asTable;
+  if (asTable) tableHtml(c.table, c.rows, c.cols);
+  else if (!c.rows.length) { c.plot.replaceChildren(Object.assign(document.createElement('div'), { textContent: 'Sem dados para os filtros atuais.', style: 'padding:24px;color:var(--muted)' })); }
+  else c.draw(c.plot, tokens());
+}
+function tile(label, value, detail, hero) {
+  const d = document.createElement('div'); d.className = 'tile' + (hero ? ' hero' : '');
+  const l = document.createElement('div'); l.className = 'l'; l.textContent = label;
+  const v = document.createElement('div'); v.className = 'v'; v.textContent = value;
+  d.append(l, v);
+  if (detail) { const dd = document.createElement('div'); dd.className = 'd'; dd.textContent = detail; d.appendChild(dd); }
+  return d;
+}
+
+/* =============================== render =============================== */
+const COLS_MONEY = (dim) => [{ key: 'label', label: dim }, { key: 'value', label: 'Valor negociado (US$)', fmt: fmtMoney, num: true }];
+const COLS_INT = (dim, m) => [{ key: 'label', label: dim }, { key: 'value', label: m, fmt: fmtInt, num: true }];
+const MONEY = { fmt: fmtMoney, short: fmtMoneyShort };
+const INT = { fmt: fmtInt, short: fmtIntShort };
+
+function renderAll() {
+  if (!D) return;
+  const { oOK, pOK } = masks(null);
+  if (page === 'overview') renderOverview(oOK, pOK); else renderReasons(oOK, pOK);
+  renderMeta();
+}
+
+function renderOverview(oOK, pOK) {
+  const A = aggregate(oOK, pOK);
+  const t = A.tot, ticket = t.orders ? t.net / t.orders : 0;
+  const k = $('#kpis'); k.replaceChildren();
+  const hero = tile('Valor total negociado', fmtMoney(t.gross), 'soma de preço unitário × quantidade (bruto)', true);
+  const audit = gross2011();
+  const b = document.createElement('div'); b.className = 'badge';
+  b.textContent = audit.ok ? 'Vendas brutas 2011 = ' + fmtMoney(audit.value) + ' · reconciliado com a auditoria' : 'Vendas brutas 2011 = ' + fmtMoney(audit.value);
+  hero.appendChild(b);
+  k.append(
+    hero,
+    tile('Número de pedidos', fmtInt(t.orders), 'pedidos distintos'),
+    tile('Quantidade comprada', fmtInt(t.qty), 'unidades'),
+    tile('Ticket médio', fmtMoney(ticket), '(bruto − descontos) ÷ pedidos'),
+    tile('Descontos', fmtMoney(t.gross - t.net), (t.gross ? ((t.gross - t.net) / t.gross * 100).toLocaleString('pt-BR', { maximumFractionDigits: 2 }) : '0') + '% do bruto'),
+  );
+
+  const labels = X.months.map(monthLabel);
+  const mRows = (arr) => X.months.map((m, i) => ({ label: monthLabel(m), ym: m, value: arr[i] })).filter(r => i_in(r.ym));
+  const i_in = ym => { const i = X.months.indexOf(ym); return i >= F.monthFrom && i <= F.monthTo; };
+  const sl = (a) => Array.from(a).slice(F.monthFrom, F.monthTo + 1);
+  const lab = labels.slice(F.monthFrom, F.monthTo + 1);
+  setCard('m_gross', mRows(A.mG), [{ key: 'label', label: 'Mês' }, { key: 'value', label: 'Valor negociado (US$)', fmt: fmtMoney, num: true }], (el, tk) => line(el, tk, lab, sl(A.mG), { prefix: 'US$ ', dec: 2, tickprefix: 'US$ ' }));
+  setCard('m_orders', mRows(A.mO), [{ key: 'label', label: 'Mês' }, { key: 'value', label: 'Pedidos', fmt: fmtInt, num: true }], (el, tk) => line(el, tk, lab, sl(A.mO), { prefix: '', dec: 0 }));
+  setCard('m_qty', mRows(A.mQ), [{ key: 'label', label: 'Mês' }, { key: 'value', label: 'Quantidade', fmt: fmtInt, num: true }], (el, tk) => line(el, tk, lab, sl(A.mQ), { prefix: '', dec: 0 }));
+
+  const catRows = topN(A.cat, 20, i => D.categories[i]);
+  setCard('by_cat', catRows, COLS_MONEY('Categoria'), (el, tk) => hbar(el, tk, catRows, MONEY));
+  const cardRows = topN(A.card, 20, i => D.card_types[i]);
+  setCard('by_card', cardRows, COLS_MONEY('Tipo de cartão'), (el, tk) => hbar(el, tk, cardRows, MONEY));
+  const ctRows = topN(A.ctype, 20, i => D.customer_types[i] === 'Store' ? 'Loja (revendedor)' : 'Pessoa física');
+  setCard('by_ctype', ctRows, COLS_MONEY('Tipo de cliente'), (el, tk) => hbar(el, tk, ctRows, MONEY));
+  const coRows = topN(A.country, 20, i => D.countries[i]);
+  setCard('by_country', coRows, COLS_MONEY('País'), (el, tk) => hbar(el, tk, coRows, MONEY));
+  const ciRows = topN(A.geo, 5, i => X.geoCity[i]).map(r => ({ ...r, sub: D.states[X.geoState[r.i]] + ', ' + D.countries[X.geoCountry[r.i]] }));
+  setCard('top_city', ciRows, [{ key: 'label', label: 'Cidade' }, { key: 'sub', label: 'Estado, país' }, { key: 'value', label: 'Valor negociado (US$)', fmt: fmtMoney, num: true }], (el, tk) => hbar(el, tk, ciRows, MONEY));
+  const cuRows = topN(A.cust, 10, i => D.customers[i][0]).map(r => ({ ...r, sub: D.customer_types[X.custType[r.i]] === 'Store' ? 'Loja' : 'Pessoa física' }));
+  setCard('top_cust', cuRows, [{ key: 'label', label: 'Cliente' }, { key: 'sub', label: 'Tipo' }, { key: 'value', label: 'Valor negociado (US$)', fmt: fmtMoney, num: true }], (el, tk) => hbar(el, tk, cuRows, MONEY));
+  const prRows = topN(A.pG, 15, i => D.products[i][0]).map(r => ({ ...r, sub: D.categories[X.prodCat[r.i]] }));
+  setCard('top_prod', prRows, [{ key: 'label', label: 'Produto' }, { key: 'sub', label: 'Categoria' }, { key: 'value', label: 'Valor negociado (US$)', fmt: fmtMoney, num: true }], (el, tk) => hbar(el, tk, prRows, MONEY));
+  const tk = new Float64Array(A.pN.length); for (let p = 0; p < tk.length; p++) tk[p] = A.pO[p] ? A.pN[p] / A.pO[p] : 0;
+  const tkRows = topN(tk, 15, i => D.products[i][0]).map(r => ({ ...r, orders: A.pO[r.i], sub: fmtInt(A.pO[r.i]) + ' pedidos' }));
+  setCard('ticket_prod', tkRows, [{ key: 'label', label: 'Produto' }, { key: 'orders', label: 'Pedidos', fmt: fmtInt, num: true }, { key: 'value', label: 'Ticket médio (US$)', fmt: fmtMoney, num: true }], (el, tk2) => hbar(el, tk2, tkRows, MONEY));
+  const stRows = topN(A.statusO, 10, i => D.statuses[i]).map(r => ({ ...r, pct: t.orders ? r.value / t.orders * 100 : 0 }));
+  setCard('by_status', stRows, [{ key: 'label', label: 'Status' }, { key: 'value', label: 'Pedidos', fmt: fmtInt, num: true }, { key: 'pct', label: '% dos pedidos', fmt: v => v.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + '%', num: true }], null);
+}
+
+function renderReasons(oOK, pOK) {
+  const R = aggregateReasons(oOK, pOK);
+  const nm = i => D.reasons[i].replace(/\s+/g, ' ');
+  const gRows = topN(R.g, 20, nm), qRows = topN(R.q, 20, nm), oRows = topN(R.ord, 20, nm);
+  setCard('r_gross', gRows, COLS_MONEY('Motivo'), (el, tk) => hbar(el, tk, gRows, MONEY));
+  setCard('r_qty', qRows, COLS_INT('Motivo', 'Quantidade'), (el, tk) => hbar(el, tk, qRows, INT));
+  setCard('r_orders', oRows, COLS_INT('Motivo', 'Pedidos'), (el, tk) => hbar(el, tk, oRows, INT));
+  $('#noReason').textContent = R.ordersTotal ? ` Nos filtros atuais, ${fmtInt(R.ordersNoReason)} de ${fmtInt(R.ordersTotal)} pedidos (${(R.ordersNoReason / R.ordersTotal * 100).toLocaleString('pt-BR', { maximumFractionDigits: 0 })}%) não têm motivo registrado — tipicamente pedidos de revendedores.` : '';
+
+  // motivo selecionado: cada pedido conta uma vez
+  const bit = 1 << F.reason, oR = new Uint8Array(oOK.length);
+  for (let o = 0; o < oR.length; o++) oR[o] = oOK[o] && (D.orders[o][6] & bit) ? 1 : 0;
+  const A = aggregate(oR, pOK);
+  const reason = nm(F.reason);
+  $('#rpTitle').textContent = 'Produtos com maior quantidade comprada no motivo "' + reason + '"';
+  const pq = topN(A.pQ, 10, i => D.products[i][0]).map(r => ({ ...r, orders: A.pO[r.i], sub: fmtInt(A.pO[r.i]) + ' pedidos · ' + D.categories[X.prodCat[r.i]] }));
+  setCard('rp_qty', pq, [{ key: 'label', label: 'Produto' }, { key: 'orders', label: 'Pedidos', fmt: fmtInt, num: true }, { key: 'value', label: 'Quantidade', fmt: fmtInt, num: true }], (el, tk) => hbar(el, tk, pq, Object.assign({ emphasize: true }, INT)));
+  const ans = $('#answer');
+  ans.replaceChildren();
+  if (pq.length) {
+    const frag = document.createDocumentFragment();
+    const add = (txt, bold) => { const e = document.createElement(bold ? 'b' : 'span'); e.textContent = txt; frag.appendChild(e); };
+    add('Com o motivo de venda '); add(reason, true); add(', o produto com a maior quantidade de unidades compradas é ');
+    add(pq[0].label, true); add(' — '); add(fmtInt(pq[0].value) + ' unidades', true);
+    add(' em ' + fmtInt(pq[0].orders) + ' pedidos (' + fmtInt(A.tot.orders) + ' pedidos no motivo, ' + fmtMoney(A.tot.gross) + ' negociados).');
+    ans.appendChild(frag);
+  } else ans.textContent = 'Nenhum pedido com o motivo "' + reason + '" nos filtros atuais.';
+  const cu = topN(A.cust, 10, i => D.customers[i][0]).map(r => ({ ...r, sub: D.customer_types[X.custType[r.i]] === 'Store' ? 'Loja' : 'Pessoa física' }));
+  setCard('rp_cust', cu, [{ key: 'label', label: 'Cliente' }, { key: 'sub', label: 'Tipo' }, { key: 'value', label: 'Valor negociado (US$)', fmt: fmtMoney, num: true }], (el, tk) => hbar(el, tk, cu, MONEY));
+  const ci = topN(A.geo, 5, i => X.geoCity[i]).map(r => ({ ...r, sub: D.states[X.geoState[r.i]] + ', ' + D.countries[X.geoCountry[r.i]] }));
+  setCard('rp_city', ci, [{ key: 'label', label: 'Cidade' }, { key: 'sub', label: 'Estado, país' }, { key: 'value', label: 'Valor negociado (US$)', fmt: fmtMoney, num: true }], (el, tk) => hbar(el, tk, ci, MONEY));
+}
+
+let _audit = null;
+function gross2011() {
+  if (_audit) return _audit;
+  let s = 0;
+  for (const L of D.lines) if (X.orderYear[L[0]] === 2011) s += L[3];
+  const value = Math.round(s * 100) / 100;
+  _audit = { value, ok: Math.abs(value - 12646112.16) < 0.005 };
+  return _audit;
+}
+
+function renderMeta() {
+  const m = D.meta;
+  $('#subtitle').textContent = `Data warehouse dimensional (Databricks + dbt) · mart rpt_sales · ${fmtInt(m.rows)} itens de pedido · ${fmtInt(m.orders)} pedidos · ${monthLabel(X.months[0])} a ${monthLabel(X.months[X.months.length - 1])}`;
+  const f = $('#footer'); f.replaceChildren();
+  const add = (txt, href) => { const e = href ? document.createElement('a') : document.createElement('span'); e.textContent = txt; if (href) { e.href = href; e.target = '_blank'; e.rel = 'noopener'; } f.appendChild(e); };
+  add('Fonte: fct_sales + dimensões (dbt) exportadas em ' + m.generated_at.slice(0, 10));
+  add('113 testes dbt: PKs, relacionamentos e reconciliação com a auditoria (2011 = US$ 12.646.112,16)');
+  add('Repositório no GitHub', 'https://github.com/arthur-eiji/CEA_AW_ArthurEiji');
+  add('Certificação em Analytics Engineer — Indicium · Arthur Eiji');
+}
+
+load().catch(err => {
+  $('#status').textContent = 'Não foi possível carregar data/sales.json (' + err.message + '). Abra o painel por um servidor HTTP (GitHub Pages) — não via file://.';
+});
+})();
+</script>
+</body>
+</html>

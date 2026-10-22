@@ -11,6 +11,13 @@
 **/profiles.yml
 .env
 
+# Exports brutos (24 MB) e modelos baixados — o painel usa docs/data/sales.json
+docs/*.csv
+docs/*.docx
+
+# Config local do preview
+.claude/
+
 # SO / editor
 .DS_Store
 *.pyc

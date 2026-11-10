@@ -13,7 +13,8 @@ renamed as (
         -- productsubcategoryid tem NULL (componentes sem subcategoria) -> chega como double
         cast(productsubcategoryid as bigint) as product_subcategory_id,
         color                                as color,
-        productline                          as product_line,
+        -- productline é nchar(2) no ERP e chega com espaço à direita ('R ', 'M ')
+        trim(productline)                    as product_line,
         cast(standardcost as decimal(19,4))  as standard_cost,
         cast(listprice as decimal(19,4))     as list_price
     from source

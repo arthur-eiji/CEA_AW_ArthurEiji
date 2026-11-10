@@ -1,5 +1,10 @@
--- 4e) Número de pedidos, quantidade comprada e valor total negociado por mês e ano
--- (série de tempo para o gráfico de linha do painel).
+-- 4e) Qual o número de pedidos, quantidade comprada e valor total negociado por mês e ano?
+--
+-- Série de tempo mensal, a mesma dos gráficos de linha do painel. Para a visão anual,
+-- agrupe apenas por year_number. Os anos de 2011 e 2014 são parciais: as vendas da base
+-- vão de 2011-05-31 a 2014-06-30.
+--
+-- Executar: dbt show --select q4e_serie_temporal --limit 50
 select
     year_number,
     month_number,

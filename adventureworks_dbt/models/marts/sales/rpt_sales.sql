@@ -2,7 +2,7 @@
 -- Grão: 1 linha por item de pedido (igual à fct_sales), já unida a todas as
 -- dimensões. Os totais aqui são EXATOS (sem fan-out) e reconciliam com a
 -- auditoria (vendas brutas 2011 = US$ 12.646.112,16).
--- O motivo de venda é M:N com o pedido, por isso aparece apenas como lista
+-- O motivo de venda é N:N com o pedido, por isso aparece apenas como lista
 -- concatenada informativa (sales_reasons). Para análises POR motivo, use
 -- rpt_sales_by_reason.
 with sales as (
@@ -99,7 +99,7 @@ final as (
         geography.state_province_name,
         geography.country_region_name,
 
-        -- motivos de venda (informativo, M:N)
+        -- motivos de venda (informativo, N:N)
         coalesce(order_reasons.sales_reasons, 'Sem motivo informado') as sales_reasons,
         coalesce(order_reasons.n_sales_reasons, 0)                    as n_sales_reasons,
 

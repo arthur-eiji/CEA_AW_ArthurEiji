@@ -1,4 +1,4 @@
--- Tabela-ponte (M:N): liga cada pedido aos seus motivos de venda.
+-- Tabela-ponte (N:N): liga cada pedido aos seus motivos de venda.
 -- Usada pelo BI SOMENTE quando se filtra/agrupa por motivo de venda.
 -- ATENÇÃO: fazer join da fato com esta ponte SEM filtrar por um único motivo
 -- duplica pedidos que têm mais de um motivo (fan-out) e infla as medidas.

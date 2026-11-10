@@ -3,179 +3,308 @@ version: 2
 sources:
   - name: adventure_works
     description: >
-      Dados brutos do ERP transacional (PostgreSQL AdventureWorks OLTP) ingeridos
-      no Databricks pelo processo de EL da Indicium. Todos os 68 objetos das áreas
-      (sales, production, person, humanresources, purchasing) foram carregados no
-      schema único `adventure_works`, com o nome físico prefixado pelo schema de
-      origem (ex.: `sales_salesorderheader`, `person_address`).
+      Dados brutos do ERP transacional da Adventure Works (PostgreSQL, AdventureWorks OLTP)
+      ingeridos no Databricks pelo processo de EL da Indicium. Os 68 objetos das áreas sales,
+      production, person, humanresources e purchasing foram carregados no schema único
+      `adventure_works`, com o nome físico prefixado pelo schema de origem (por exemplo
+      `sales_salesorderheader` e `person_address`). Este projeto usa 14 dessas tabelas.
+      A ingestão não preserva os tipos do ERP: inteiros com nulos chegam como double e datas
+      chegam como texto. Por isso a tipagem é fixada na camada de staging.
     # Catálogo (Unity Catalog) onde a ingestão criou o schema adventure_works.
     database: fea_academy
     schema: adventure_works
 
     # Convenção: `name` = nome lógico usado no source() dos modelos;
     #            `identifier` = nome físico da tabela no Databricks.
+    # Só as colunas usadas pelo projeto estão documentadas.
     tables:
       # ---------------------------------------------------------------- SALES
       - name: salesorderheader
         identifier: sales_salesorderheader
-        description: Cabeçalho do pedido de venda (1 linha por pedido).
+        description: >
+          Cabeçalho do pedido de venda: 1 linha por pedido, com cliente, datas, status,
+          endereço de entrega, cartão e totais. Origem dos atributos de pedido da fct_sales.
         columns:
           - name: salesorderid
-            description: Chave primária do pedido.
+            description: Chave primária do pedido; identificador único do pedido no ERP.
             tests: [not_null, unique]
           - name: customerid
-            description: FK para customer.
+            description: Cliente que fez o pedido. Chave estrangeira para sales_customer.customerid.
             tests:
               - not_null
               - relationships:
                   to: source('adventure_works', 'customer')
                   field: customerid
           - name: orderdate
-            description: Data do pedido (usada como data de venda).
+            description: >
+              Data em que o pedido foi criado; é a "data de venda" do dicionário de dados.
+              Chega como texto e é convertida para date na staging.
             tests: [not_null]
           - name: status
-            description: Status do pedido (1..6).
+            description: >
+              Status do pedido como código numérico: 1 = In process, 2 = Approved,
+              3 = Backordered, 4 = Rejected, 5 = Shipped, 6 = Cancelled.
             tests:
               - not_null
               - accepted_values:
                   values: [1, 2, 3, 4, 5, 6]
+          - name: shiptoaddressid
+            description: >
+              Endereço de entrega do pedido. Chave estrangeira para person_address.addressid;
+              define a cidade, o estado e o país da venda.
+          - name: creditcardid
+            description: >
+              Cartão de crédito usado no pedido. Chave estrangeira para
+              sales_creditcard.creditcardid; nulo quando o pedido não foi pago com cartão.
+              Por conter nulos, chega como double (5.0 em vez de 5).
+          - name: salespersonid
+            description: Vendedor responsável pelo pedido; nulo em pedidos feitos online.
+          - name: territoryid
+            description: Território de vendas do pedido.
+          - name: onlineorderflag
+            description: Indica se o pedido foi feito online (true) ou por um vendedor (false).
+          - name: subtotal
+            description: Soma dos itens do pedido após descontos, em US$, antes de imposto e frete.
+          - name: taxamt
+            description: Valor do imposto do pedido, em US$.
+          - name: freight
+            description: Valor do frete do pedido, em US$.
+          - name: totaldue
+            description: Total devido pelo cliente, em US$ (subtotal + imposto + frete).
 
       - name: salesorderdetail
         identifier: sales_salesorderdetail
-        description: Linhas de item do pedido (grão da tabela fato).
+        description: >
+          Itens do pedido de venda: 1 linha por produto dentro de um pedido. É o grão da
+          tabela fato e a origem das medidas de quantidade e valor. Na base ingerida não
+          existe a coluna linetotal, que é calculada no ERP original.
         columns:
           - name: salesorderdetailid
-            description: Chave primária da linha de pedido.
+            description: Chave primária do item de pedido.
             tests: [not_null, unique]
           - name: salesorderid
-            description: FK para o cabeçalho do pedido.
+            description: Pedido ao qual o item pertence. Chave estrangeira para sales_salesorderheader.salesorderid.
             tests:
               - not_null
               - relationships:
                   to: source('adventure_works', 'salesorderheader')
                   field: salesorderid
           - name: productid
-            description: FK para product.
+            description: Produto vendido no item. Chave estrangeira para production_product.productid.
             tests:
               - not_null
               - relationships:
                   to: source('adventure_works', 'product')
                   field: productid
           - name: orderqty
-            description: Quantidade comprada na linha.
+            description: Quantidade de unidades do produto no item.
             tests: [not_null]
           - name: unitprice
-            description: Preço unitário negociado.
+            description: Preço unitário negociado no item, em US$, antes de descontos.
             tests: [not_null]
+          - name: unitpricediscount
+            description: Percentual de desconto do item, como fração entre 0 e 1.
+          - name: specialofferid
+            description: Oferta especial aplicada ao item.
 
       - name: customer
         identifier: sales_customer
-        description: Clientes (pessoa física via personid ou loja via storeid).
+        description: >
+          Cadastro de clientes: 1 linha por cliente. O cliente é uma pessoa física (personid
+          preenchido e storeid nulo) ou está ligado a uma loja revendedora (storeid preenchido).
         columns:
           - name: customerid
+            description: Chave primária do cliente.
             tests: [not_null, unique]
+          - name: personid
+            description: >
+              Pessoa associada ao cliente. Chave estrangeira para
+              person_person.businessentityid; nula quando o cadastro é só da loja.
+          - name: storeid
+            description: >
+              Loja revendedora associada ao cliente. Chave estrangeira para
+              sales_store.businessentityid; nula para pessoas físicas.
+          - name: territoryid
+            description: Território de vendas do cliente.
 
       - name: store
         identifier: sales_store
-        description: Lojas/revendedores (nome dos clientes do tipo Store).
+        description: >
+          Lojas revendedoras: 1 linha por loja. Fornece o nome dos clientes do tipo Store,
+          que respondem pela maior parte do valor negociado.
         columns:
           - name: businessentityid
+            description: Chave primária da loja.
             tests: [not_null, unique]
           - name: name
+            description: Nome da loja revendedora.
             tests: [not_null]
+          - name: salespersonid
+            description: Vendedor responsável pela conta da loja.
 
       - name: creditcard
         identifier: sales_creditcard
-        description: Cartões de crédito usados nos pedidos.
+        description: Cartões de crédito cadastrados; 1 linha por cartão.
         columns:
           - name: creditcardid
+            description: Chave primária do cartão.
             tests: [not_null, unique]
           - name: cardtype
-            description: Tipo/bandeira do cartão.
+            description: Tipo (bandeira) do cartão; SuperiorCard, Distinguish, ColonialVoice ou Vista.
             tests: [not_null]
 
       - name: salesreason
         identifier: sales_salesreason
-        description: Motivos de venda (Promotion, Price, Manufacturer, etc.).
+        description: >
+          Motivos de venda cadastrados no ERP: 1 linha por motivo (10 motivos, por exemplo
+          Price, On Promotion e Manufacturer). ACHADO DE QUALIDADE: o nome
+          "Television  Advertisement" está gravado com dois espaços. O teste fica como WARN
+          para documentar o defeito na fonte; a correção é feita na staging
+          (stg_adventure_works__sales_reason).
         columns:
           - name: salesreasonid
+            description: Chave primária do motivo de venda.
             tests: [not_null, unique]
           - name: name
-            tests: [not_null]
+            description: >
+              Nome do motivo de venda. O motivo da pergunta de negócio 4f chama-se
+              "On Promotion" ("Promotion" é o valor de reasontype desse motivo).
+            tests:
+              - not_null
+              - dbt_utils.expression_is_true:
+                  expression: "not like '%  %'"
+                  config:
+                    severity: warn
+          - name: reasontype
+            description: Agrupamento do motivo; Marketing, Promotion ou Other.
 
       - name: salesorderheadersalesreason
         identifier: sales_salesorderheadersalesreason
-        description: Ponte M:N entre pedidos e motivos de venda.
+        description: >
+          Associação entre pedidos e motivos de venda: 1 linha por pedido e motivo. A relação
+          é N:N, pois um pedido pode ter vários motivos, e nem todo pedido tem motivo informado.
         columns:
           - name: salesorderid
+            description: Pedido. Chave estrangeira para sales_salesorderheader.salesorderid.
             tests: [not_null]
           - name: salesreasonid
+            description: Motivo de venda. Chave estrangeira para sales_salesreason.salesreasonid.
             tests: [not_null]
 
       # ------------------------------------------------------------ PRODUCTION
       - name: product
         identifier: production_product
-        description: Catálogo de produtos.
+        description: Catálogo de produtos; 1 linha por produto (504 produtos).
         columns:
           - name: productid
+            description: Chave primária do produto.
             tests: [not_null, unique]
           - name: name
+            description: Nome do produto, por exemplo "Mountain-200 Black, 38".
             tests: [not_null]
+          - name: productnumber
+            description: Código alfanumérico do produto no ERP.
+          - name: productsubcategoryid
+            description: >
+              Subcategoria do produto. Chave estrangeira para
+              production_productsubcategory.productsubcategoryid; nula para produtos sem
+              subcategoria, por isso chega como double.
+          - name: color
+            description: Cor do produto; nula quando não se aplica.
+          - name: productline
+            description: >
+              Linha do produto (R = Road, M = Mountain, T = Touring, S = Standard). Chega com
+              um espaço à direita, removido na staging.
+          - name: standardcost
+            description: Custo padrão do produto, em US$.
+          - name: listprice
+            description: Preço de tabela do produto, em US$.
 
       - name: productsubcategory
         identifier: production_productsubcategory
-        description: Subcategorias de produto.
+        description: Subcategorias de produto; 1 linha por subcategoria (por exemplo Mountain Bikes).
         columns:
           - name: productsubcategoryid
+            description: Chave primária da subcategoria.
             tests: [not_null, unique]
+          - name: productcategoryid
+            description: Categoria da subcategoria. Chave estrangeira para production_productcategory.productcategoryid.
+          - name: name
+            description: Nome da subcategoria.
 
       - name: productcategory
         identifier: production_productcategory
-        description: Categorias de produto.
+        description: Categorias de produto; 1 linha por categoria (Bikes, Components, Clothing e Accessories).
         columns:
           - name: productcategoryid
+            description: Chave primária da categoria.
             tests: [not_null, unique]
+          - name: name
+            description: Nome da categoria.
 
       # ---------------------------------------------------------------- PERSON
       - name: person
         identifier: person_person
-        description: Pessoas (nomes de clientes e vendedores).
+        description: Pessoas cadastradas no ERP (clientes, contatos de lojas e funcionários); 1 linha por pessoa.
         columns:
           - name: businessentityid
+            description: Chave primária da pessoa.
             tests: [not_null, unique]
+          - name: persontype
+            description: Tipo da pessoa no ERP, por exemplo IN = cliente pessoa física e SC = contato de loja.
+          - name: firstname
+            description: Primeiro nome.
+          - name: middlename
+            description: Nome do meio; nulo para a maioria das pessoas.
+          - name: lastname
+            description: Sobrenome.
 
       - name: address
         identifier: person_address
-        description: Endereços (cidade).
+        description: Endereços cadastrados; 1 linha por endereço. Origem da cidade das vendas.
         columns:
           - name: addressid
+            description: Chave primária do endereço.
             tests: [not_null, unique]
           - name: stateprovinceid
+            description: Estado ou província do endereço. Chave estrangeira para person_stateprovince.stateprovinceid.
             tests: [not_null]
+          - name: city
+            description: Nome da cidade.
+          - name: postalcode
+            description: Código postal.
 
       - name: stateprovince
         identifier: person_stateprovince
-        description: Estados/províncias.
+        description: Estados e províncias; 1 linha por estado.
         columns:
           - name: stateprovinceid
+            description: Chave primária do estado ou província.
             tests: [not_null, unique]
           - name: countryregioncode
+            description: País do estado. Chave estrangeira para person_countryregion.countryregioncode.
             tests: [not_null]
+          - name: stateprovincecode
+            description: Sigla do estado ou província, por exemplo CA.
+          - name: name
+            description: Nome do estado ou província.
 
       - name: countryregion
         identifier: person_countryregion
         description: >
-          Países/regiões. ACHADO DE QUALIDADE: a ingestão trouxe 1 linha com
-          countryregioncode NULO (no OLTP original é PK, nunca nulo). Causa provável:
-          o código "NA" (Namíbia) foi interpretado como nulo na leitura do CSV.
-          O teste fica como WARN para documentar o defeito na fonte; a correção
-          é feita na staging (stg_adventure_works__country_region).
+          Países e regiões; 1 linha por país. ACHADO DE QUALIDADE: a ingestão trouxe 1 linha
+          com countryregioncode nulo (no ERP a coluna é chave primária e nunca é nula).
+          A causa é o código "NA" da Namíbia, interpretado como nulo na leitura do arquivo.
+          O teste fica como WARN para documentar o defeito na fonte; a correção é feita na
+          staging (stg_adventure_works__country_region).
         columns:
           - name: countryregioncode
+            description: Chave primária do país; código ISO de duas letras, por exemplo US.
             tests:
               - unique
               - not_null:
                   config:
                     severity: warn
           - name: name
+            description: Nome do país em inglês, por exemplo United States.
             tests: [not_null]

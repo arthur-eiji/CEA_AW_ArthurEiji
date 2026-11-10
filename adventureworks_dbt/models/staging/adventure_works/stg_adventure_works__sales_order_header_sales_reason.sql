@@ -1,4 +1,4 @@
--- Ponte M:N: um pedido pode ter vários motivos de venda.
+-- Ponte N:N: um pedido pode ter vários motivos de venda.
 with source as (
 
     select * from {{ source('adventure_works', 'salesorderheadersalesreason') }}

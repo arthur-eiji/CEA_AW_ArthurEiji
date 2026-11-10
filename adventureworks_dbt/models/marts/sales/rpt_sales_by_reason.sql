@@ -1,7 +1,7 @@
 -- Grão: 1 linha por item de pedido × motivo de venda.
 -- Um pedido com N motivos gera N linhas (fan-out INTENCIONAL). Use esta tabela
 -- apenas para análises POR motivo ou FILTRADAS por motivo (ex.: item 4f —
--- produto com maior quantidade para "Promotion"). Não some totais sem filtrar
+-- produto com maior quantidade para o motivo "On Promotion"). Não some totais sem filtrar
 -- por motivo; para totais exatos use rpt_sales.
 with sales as (
 

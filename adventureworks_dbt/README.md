@@ -1,198 +1,216 @@
-# Adventure Works — Data Warehouse de Vendas (dbt + Databricks)
+# Projeto dbt — Data Warehouse de Vendas da Adventure Works
 
-Projeto de Engenharia de Analytics da **Certificação em Analytics Engineer (Indicium)**.
-Transforma os dados brutos do ERP transacional (AdventureWorks OLTP, schema
-`adventure_works` no Databricks) em um **modelo dimensional (star schema)** de vendas,
-pronto para responder às perguntas de negócio da diretoria em uma ferramenta de BI.
+Transforma os dados brutos do ERP (schema `fea_academy.adventure_works` no Databricks) em
+um modelo dimensional de vendas, testado e documentado, e nas tabelas de consumo usadas
+pelo painel de BI.
 
-Stack: **Databricks** (data warehouse) + **dbt Core** (transformação, adapter `dbt-databricks`).
+Stack: **Databricks** (data warehouse) e **dbt Core** com o adapter `dbt-databricks`.
+A visão geral do projeto e as respostas às perguntas de negócio estão no
+[README da raiz](../README.md).
 
 ---
 
-## 1. Arquitetura
+## 1. Camadas
 
 ```
-  adventure_works (raw, Databricks)
+  adventure_works (dados brutos)
           │
           ▼
-  staging/  ── 1 view por tabela-fonte (rename snake_case, casts, limpeza leve)
-          │
+  models/staging/adventure_works/     14 views, uma por tabela-fonte, sem joins
+          │                           nomes em snake_case, tipos fixados, defeitos corrigidos
           ▼
-  marts/sales/ ── modelo dimensional (star schema)
-          ├── fct_sales               (grão: item de pedido / salesorderdetail)
-          ├── dim_product
-          ├── dim_customer
-          ├── dim_credit_card
-          ├── dim_sales_reason  + br_order_sales_reason (ponte M:N)
-          ├── dim_order_status
-          ├── dim_geography
-          ├── dim_date
-          ├── rpt_sales               (tabela larga p/ BI — totais exatos, sem fan-out)
-          └── rpt_sales_by_reason     (grão item × motivo — análises por motivo, ex. 4f)
+  models/marts/sales/                 modelo dimensional (tabelas)
+          ├── fct_sales                   grão: item de pedido
+          ├── dim_product, dim_customer, dim_credit_card, dim_order_status,
+          │   dim_geography, dim_date, dim_sales_reason
+          ├── br_order_sales_reason       ponte N:N entre pedido e motivo de venda
+          ├── rpt_sales                   tabela larga para o BI (mesmo grão da fato)
+          └── rpt_sales_by_reason         grão item × motivo, para análises por motivo
 ```
 
-### Star schema
+### Modelo dimensional
 
-| Dimensão | Grão | Fontes (schema `adventure_works`) |
+| Tabela | Grão | Fontes (nome físico em `adventure_works`) |
 |---|---|---|
-| `dim_product` | produto | `product`, `productsubcategory`, `productcategory` |
-| `dim_customer` | cliente | `customer`, `person` |
-| `dim_credit_card` | cartão | `creditcard` |
-| `dim_sales_reason` | motivo de venda | `salesreason` |
-| `dim_order_status` | status | derivada de `salesorderheader.status` |
-| `dim_geography` | endereço | `address`, `stateprovince`, `countryregion` |
-| `dim_date` | dia | gerada (`dbt_utils.date_spine`) |
-| `br_order_sales_reason` | pedido × motivo | `salesorderheadersalesreason` (ponte M:N) |
-| **`fct_sales`** | **item de pedido** | `salesorderdetail` + `salesorderheader` |
+| **`fct_sales`** | item de pedido | `sales_salesorderdetail`, `sales_salesorderheader` |
+| `dim_product` | produto | `production_product`, `production_productsubcategory`, `production_productcategory` |
+| `dim_customer` | cliente | `sales_customer`, `person_person`, `sales_store` |
+| `dim_credit_card` | cartão | `sales_creditcard` |
+| `dim_order_status` | status do pedido | derivada de `sales_salesorderheader.status` |
+| `dim_geography` | endereço de entrega | `person_address`, `person_stateprovince`, `person_countryregion` |
+| `dim_date` | dia | gerada com `dbt_utils.date_spine` |
+| `dim_sales_reason` | motivo de venda | `sales_salesreason` |
+| `br_order_sales_reason` | pedido × motivo | `sales_salesorderheadersalesreason` |
 
-**Medidas da fato:** `order_qty`, `unit_price`, `gross_amount` (= `unit_price*order_qty`,
-o "valor total negociado"/vendas brutas), `discount_amount`, `net_amount`
-(= bruto × (1 − desconto), equivalente ao `linetotal` computado do OLTP).
-Número de pedidos = `count(distinct sales_order_id)` (medida não-aditiva, calculada no BI).
+**Medidas da fato:** `order_qty` (quantidade comprada), `gross_amount` (valor total
+negociado, `unit_price × order_qty`), `discount_amount` e `net_amount` (valor líquido,
+`gross_amount − discount_amount`). O número de pedidos é `count(distinct sales_order_id)`,
+uma medida não aditiva calculada na consulta. O ticket médio é
+`sum(net_amount) ÷ count(distinct sales_order_id)`.
 
-> **Motivo de venda é M:N.** Um pedido pode ter vários motivos. Por isso o motivo **não**
-> fica na fato (inflaria as medidas); fica na ponte `br_order_sales_reason`, usada no BI
-> apenas quando se filtra/agrupa por motivo (join por `sales_order_id`).
+**Motivo de venda é N:N com o pedido.** Um pedido pode ter vários motivos e muitos não têm
+nenhum. Por isso o motivo não entra na fato, o que repetiria itens e inflaria as medidas;
+ele fica na ponte `br_order_sales_reason`, usada apenas para filtrar ou agrupar por motivo.
+
+### Correções feitas na staging
+
+A ingestão não preserva os tipos do ERP e traz alguns defeitos. Tudo é tratado na staging,
+para que os marts não precisem conhecer as particularidades da origem:
+
+| Defeito na origem | Tratamento | Onde |
+|---|---|---|
+| Código `NA` da Namíbia chega nulo | código restaurado a partir do nome do país | `stg_adventure_works__country_region` |
+| `Television  Advertisement` gravado com dois espaços | espaços repetidos removidos do nome do motivo | `stg_adventure_works__sales_reason` |
+| Inteiros com nulos chegam como `double` (`5.0`) | chaves convertidas para `bigint` | modelos de pedido, cliente, produto e cartão |
+| Datas chegam como texto | convertidas para `date` | `stg_adventure_works__sales_order_header` |
+| `productline` com espaço à direita | `trim` | `stg_adventure_works__product` |
+| Coluna `linetotal` não existe na base ingerida | valor líquido recalculado na fato (`net_amount`) | `fct_sales` |
+
+Os dois primeiros defeitos também são registrados por testes de source em nível de aviso
+(`WARN`), para que fiquem visíveis a cada execução.
+
+### Documentação
+
+Todas as tabelas e colunas estão descritas nos arquivos YAML:
+
+- `models/staging/adventure_works/_adventure_works__sources.yml`: tabelas-fonte e colunas usadas;
+- `models/staging/adventure_works/_adventure_works__models.yml`: modelos de staging;
+- `models/marts/sales/_sales__models.yml`: fato, dimensões, ponte e tabelas de consumo, com
+  o significado de negócio, a origem e a regra de cálculo de cada coluna.
+
+Para navegar pela documentação e pela linhagem: `dbt docs generate` e `dbt docs serve`.
 
 ---
 
-## 2. Pré-requisitos
+## 2. Como rodar
 
-- Um workspace **Databricks** com um **SQL Warehouse** ativo.
-- Os dados do AdventureWorks já ingeridos no schema **`adventure_works`** (etapa EL —
-  ver seção 3.1).
-- **Python 3.9+** e o adapter do dbt para Databricks:
-  ```bash
-  pip install dbt-databricks
-  ```
+### 2.1. Pré-requisitos
 
----
+- Workspace **Databricks** com um SQL Warehouse. O projeto foi desenvolvido no
+  [Databricks Free Edition](https://www.databricks.com/learn/free-edition).
+- Dados do AdventureWorks ingeridos no schema `adventure_works`, conforme o repositório de
+  datasources da Indicium: <https://bitbucket.org/indiciumtech/databricks-datasources/src/main/>.
+  A ingestão cria 68 tabelas em `fea_academy.adventure_works`, com o nome prefixado pelo
+  schema de origem (por exemplo `sales_salesorderheader`). O mapeamento entre o nome lógico
+  usado nos modelos e o nome físico está nos `identifier` do arquivo de sources.
+- Python 3.9 ou superior e o adapter do dbt:
 
-## 3. Como rodar (passo a passo)
+```bash
+pip install dbt-databricks
+```
 
-### 3.1. Ingestão dos dados (EL)
-Siga as instruções do repositório de datasources da Indicium para carregar o
-AdventureWorks no Databricks, **usando somente o schema `adventure_works`**:
-<https://bitbucket.org/indiciumtech/databricks-datasources/src/main/>
-
-### 3.2. Configurar a conexão (profiles)
-Este projeto foi feito para o **Databricks Free Edition** (grátis, sem cartão):
-<https://www.databricks.com/learn/free-edition>
+### 2.2. Conexão
 
 Copie `profiles.example.yml` para `~/.dbt/profiles.yml` e preencha `host` e `http_path`
-(SQL Warehouses → *Serverless Starter Warehouse* → *Connection details*). O `catalog`
-é `fea_academy` (o mesmo onde a ingestão criou o `adventure_works`); o `schema`
-(ex.: `dbt_arthur`) é criado pelo dbt.
+(em SQL Warehouses → Connection details). O `catalog` é `fea_academy`; o `schema` de
+destino, por exemplo `dbt_arthur`, é criado pelo dbt.
 
-Autenticação: o template usa **OAuth** (`auth_type: oauth`) — no primeiro `dbt debug`
-abre o navegador para você logar, sem precisar gerar token. Se preferir Personal Access
-Token, troque para `token: "{{ env_var('DBT_DATABRICKS_TOKEN') }}"` e exporte a variável:
+O modelo usa autenticação OAuth (`auth_type: oauth`): na primeira execução o navegador
+abre para o login, sem token gravado em arquivo. Para usar um token de acesso pessoal,
+troque por `token: "{{ env_var('DBT_DATABRICKS_TOKEN') }}"` e exporte a variável de
+ambiente.
+
+### 2.3. Construir e testar
+
 ```bash
-export DBT_DATABRICKS_TOKEN="dapi....seu_token"
+dbt deps                        # instala o pacote dbt_utils
+dbt debug                       # confere a conexão
+dbt run                         # constrói as 14 views de staging e as 11 tabelas dos marts
+dbt test --select "source:*"    # 47 testes nos dados brutos
+dbt test                        # todos os 117 testes
 ```
 
-### 3.3. Instalar dependências do dbt
-```bash
-dbt deps
-```
-
-### 3.4. Estrutura dos dados brutos no Databricks
-A ingestão da Indicium cria o schema em `fea_academy.adventure_works`, com 68 tabelas
-cujo nome físico é prefixado pelo schema de origem do Postgres
-(ex.: `sales_salesorderheader`, `production_product`, `person_address`). Confira com:
-```sql
-SHOW TABLES IN fea_academy.adventure_works;
-```
-O mapeamento nome lógico → nome físico já está feito via `identifier` em
-`models/staging/adventure_works/_adventure_works__sources.yml`; os modelos usam
-sempre o nome lógico (`source('adventure_works', 'salesorderheader')`).
-
-### 3.5. Rodar e testar
-```bash
-dbt run                       # constrói staging + marts
-dbt test --select source:*    # testes nas sources (item 3b)
-dbt test                      # todos os testes: PKs, relacionamentos e teste de dado
-```
-
-### 3.6. Documentação navegável
-```bash
-dbt docs generate
-dbt docs serve
-```
+Resultado esperado de `dbt test`: `PASS=115 WARN=2 ERROR=0`. Os dois avisos são os
+defeitos da origem descritos acima.
 
 ---
 
-## 4. Testes (garantia de qualidade)
+## 3. Testes
 
-| Requisito | Onde | O quê |
+| O que é garantido | Tipo de teste | Onde |
 |---|---|---|
-| Testes de source (3b) | `_adventure_works__sources.yml` | `not_null`, `unique`, `relationships`, `accepted_values` nas tabelas brutas |
-| PKs de dimensões e fato (3c) | `_sales__models.yml` | `unique` + `not_null` em cada surrogate key e em `sales_order_detail_id` |
-| Integridade referencial | `_sales__models.yml` | `relationships` de cada FK da `fct_sales` para as dimensões |
-| **Teste de dado (3d)** | `tests/assert_gross_sales_2011.sql` | Garante **vendas brutas de 2011 = US$ 12.646.112,16** (pedido do Carlos) |
+| Chaves dos dados brutos não nulas e únicas; pedidos, itens e produtos relacionados; status entre 1 e 6 | `not_null`, `unique`, `relationships`, `accepted_values` | `_adventure_works__sources.yml` |
+| Defeitos conhecidos da origem ficam registrados | `not_null` e `expression_is_true` com severidade `warn` | `_adventure_works__sources.yml` |
+| Chave primária de cada dimensão e da fato | `unique` e `not_null` | `_sales__models.yml` |
+| Toda chave estrangeira da fato e da ponte encontra a sua dimensão | `relationships` | `_sales__models.yml` |
+| Domínios: tipo de cliente, nome e tipo do motivo de venda | `accepted_values` | `_sales__models.yml` |
+| Quantidade e valor bruto nunca negativos; grãos compostos sem duplicidade | `dbt_utils.expression_is_true`, `dbt_utils.unique_combination_of_columns` | `_sales__models.yml` |
+| **Vendas brutas de 2011 = US$ 12.646.112,16**, o valor confirmado pela auditoria | teste de dado singular | `tests/assert_gross_sales_2011.sql` |
+| A tabela larga do BI tem as mesmas linhas e o mesmo total da fato (sem fan-out) | teste de dado singular | `tests/assert_rpt_sales_no_fanout.sql` |
+| O motivo `On Promotion`, usado na pergunta 4f, existe e tem vendas | teste de dado singular | `tests/assert_on_promotion_reason_has_sales.sql` |
 
-O teste de dado é um teste **singular**: soma `gross_amount` para `year(order_date)=2011`,
-arredonda a 2 casas e falha se divergir do valor auditado (parametrizado na var
-`gross_sales_2011_expected` do `dbt_project.yml`).
-
----
-
-## 5. Como o modelo responde às perguntas de negócio (item 4)
-
-**Painel interativo (público):** <https://arthur-eiji.github.io/CEA_AW_ArthurEiji/>
-
-O painel é uma aplicação web estática versionada junto com o código (`docs/index.html`,
-publicada via GitHub Pages) e construída sobre a mart `rpt_sales`: o script
-`scripts/build_dashboard_data.py` compacta o export da mart (24 MB) em um JSON
-dicionário-codificado (`docs/data/sales.json`, 4,6 MB), e a página agrega os 121 mil itens
-de pedido no navegador. Decisões de BI-as-code: sem dependência de licença ou de
-compartilhamento, filtros numa única linha acima de todos os gráficos, um eixo por gráfico
-(a série mensal vira três gráficos pequenos), uma cor por série, versão em tabela de todo
-gráfico (acessibilidade), modo escuro e selo de reconciliação com a auditoria calculado ao vivo.
-As queries SQL equivalentes a cada pergunta estão em `analyses/q4a…q4f.sql`. Todas descem do grão da `fct_sales`
-+ dimensões conformadas:
-
-- **4a** nº pedidos / qtd / valor por produto, cartão, motivo, data, cliente, status, cidade/estado/país → `fct_sales` × todas as dims (motivo via ponte).
-- **4b** ticket médio (`(bruto − desconto)/nº pedidos`) por mês/ano/cidade/estado/país → `net_amount` ÷ `count(distinct sales_order_id)`.
-- **4c** top 10 clientes por valor negociado → `dim_customer` + `sum(gross_amount)`.
-- **4d** top 5 cidades por valor negociado → `dim_geography` + `sum(gross_amount)`.
-- **4e** série temporal (nº pedidos, qtd, valor por mês/ano) → `dim_date`.
-- **4f** produto com maior qtd para motivo **"Promotion"** → `fct_sales` × `br_order_sales_reason` × `dim_sales_reason` (filtro `Promotion`) + `sum(order_qty)`.
+O valor auditado de 2011 é um parâmetro do projeto (`gross_sales_2011_expected` em
+`dbt_project.yml`).
 
 ---
 
-## 6. Estrutura do projeto
+## 4. SQL de apoio das perguntas de negócio
+
+As consultas da pasta `analyses/` respondem às perguntas de negócio a partir das tabelas de
+consumo. Cada uma pode ser executada direto pelo dbt:
+
+| Pergunta | Consulta | Execução |
+|---|---|---|
+| **4a** Pedidos, quantidade e valor por produto, tipo de cartão, motivo de venda, data, cliente, status, cidade, estado e país | `q4a_metricas_por_dimensao.sql` | `dbt show --select q4a_metricas_por_dimensao --limit 100000` |
+| **4b** Produtos com maior ticket médio por mês, ano, cidade, estado e país | `q4b_ticket_medio.sql` | `dbt show --select q4b_ticket_medio --limit 50` |
+| **4c** 10 melhores clientes por valor negociado | `q4c_top10_clientes.sql` | `dbt show --select q4c_top10_clientes --limit 10` |
+| **4d** 5 melhores cidades por valor negociado | `q4d_top5_cidades.sql` | `dbt show --select q4d_top5_cidades --limit 5` |
+| **4e** Pedidos, quantidade e valor por mês e ano | `q4e_serie_temporal.sql` | `dbt show --select q4e_serie_temporal --limit 50` |
+| **4f** Produto com mais unidades compradas no motivo "Promotion" | `q4f_produto_on_promotion.sql` | `dbt show --select q4f_produto_on_promotion --limit 10` |
+
+**Pergunta 4f e o motivo `On Promotion`.** A pergunta fala em motivo "Promotion", mas no ERP
+o motivo se chama `On Promotion`; `Promotion` é o valor de `reason_type` desse motivo, o
+único do grupo. A consulta, o painel e a documentação usam o mesmo filtro:
+
+```sql
+where sales_reason_name = 'On Promotion'
+```
+
+Resposta: **Water Bottle - 30 oz., com 546 unidades**.
+
+As consultas de ranking (4b, 4c, 4d e 4f) usam `row_number()` em vez de `limit`, porque o
+`dbt show` acrescenta o seu próprio `limit` ao final da consulta.
+
+---
+
+## 5. Dados do painel
+
+O painel (`../docs/index.html`) lê uma extração da tabela de consumo `rpt_sales`. Para
+atualizá-la depois de um `dbt run`:
+
+```bash
+dbt show --quiet --select painel_export_rpt_sales --limit 200000 --output json > /tmp/rpt_sales.json
+python3 ../scripts/build_dashboard_data.py /tmp/rpt_sales.json ../docs/data/sales.json
+```
+
+A consulta `analyses/painel_export_rpt_sales.sql` traz só as colunas usadas pelo painel, e
+o script grava os textos como dicionários para reduzir o arquivo a poucos megabytes.
+
+---
+
+## 6. Estrutura
 
 ```
 adventureworks_dbt/
 ├── dbt_project.yml
-├── packages.yml                 # dbt_utils
-├── profiles.example.yml         # template de conexão (copiar p/ ~/.dbt/)
+├── packages.yml                    dbt_utils
+├── profiles.example.yml            modelo de conexão, para copiar em ~/.dbt/
 ├── models/
 │   ├── staging/adventure_works/
-│   │   ├── _adventure_works__sources.yml   # sources + testes de source
-│   │   └── stg_adventure_works__*.sql      # 13 views de staging
+│   │   ├── _adventure_works__sources.yml    sources, descrições e testes de source
+│   │   ├── _adventure_works__models.yml     descrições dos modelos de staging
+│   │   └── stg_adventure_works__*.sql       14 views de staging
 │   └── marts/sales/
-│       ├── _sales__models.yml              # docs + testes (PKs, relationships)
-│       ├── dim_*.sql / br_*.sql            # dimensões + ponte
-│       └── fct_sales.sql                   # tabela fato
+│       ├── _sales__models.yml               descrições e testes dos marts
+│       ├── fct_sales.sql                    tabela fato
+│       ├── dim_*.sql                        dimensões
+│       ├── br_order_sales_reason.sql        ponte N:N
+│       └── rpt_*.sql                        tabelas de consumo para o BI
 ├── analyses/
-│   └── q4a…q4f_*.sql                       # queries que respondem as perguntas de negócio
+│   ├── q4a … q4f                            SQL de apoio das perguntas de negócio
+│   └── painel_export_rpt_sales.sql          extração que alimenta o painel
 └── tests/
-    ├── assert_gross_sales_2011.sql         # teste de dado (US$ 12.646.112,16)
-    └── assert_rpt_sales_no_fanout.sql      # rpt_sales == fct_sales (linhas e total)
-```
-
-Na raiz do repositório:
-
-```
-CEA_AW_ArthurEiji/
-├── adventureworks_dbt/          # este projeto dbt
-├── docs/
-│   ├── index.html               # painel de BI (GitHub Pages)
-│   ├── data/sales.json          # dados compactados da mart rpt_sales
-│   ├── modelo_conceitual_dw.pdf # diagrama conceitual (+ .drawio editável)
-│   └── roteiro_video.md         # roteiro da apresentação
-├── scripts/build_dashboard_data.py
-└── entrega/                     # pasta de entrega (links + PDF)
+    ├── assert_gross_sales_2011.sql
+    ├── assert_rpt_sales_no_fanout.sql
+    └── assert_on_promotion_reason_has_sales.sql
 ```

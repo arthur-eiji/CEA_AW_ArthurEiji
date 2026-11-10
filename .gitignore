@@ -11,12 +11,15 @@
 **/profiles.yml
 .env
 
-# Exports brutos (24 MB) e modelos baixados — o painel usa docs/data/sales.json
+# Exportações brutas e documentos baixados: o painel usa docs/data/sales.json
 docs/*.csv
 docs/*.docx
 
 # Config local do preview
 .claude/
+
+# Arquivos locais de apoio (não fazem parte do projeto)
+entrega/
 
 # SO / editor
 .DS_Store

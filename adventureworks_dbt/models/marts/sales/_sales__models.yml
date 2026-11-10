@@ -1,337 +1,705 @@
 version: 2
 
+# Camada de marts: modelo dimensional (star schema) da área de vendas e tabelas de
+# consumo para o BI. Todas as tabelas e colunas estão documentadas; as chaves primárias
+# e estrangeiras são testadas.
+
 models:
   # =========================================================== FATO
   - name: fct_sales
     description: >
-      Tabela fato de vendas no grão de item de pedido (salesorderdetail).
-      Cada linha representa um produto vendido dentro de um pedido, com as
-      chaves estrangeiras para as dimensões conformadas e as medidas de venda.
-      A contagem de pedidos é feita como count(distinct sales_order_id).
+      Tabela fato de vendas da Adventure Works. Grão: 1 linha por item de pedido, ou seja,
+      um produto dentro de um pedido (121.317 itens em 31.465 pedidos). Reúne as chaves
+      estrangeiras para as dimensões conformadas (produto, cliente, cartão, status, data e
+      geografia de entrega) e as medidas aditivas de quantidade e valor. O número de pedidos
+      não é armazenado: é uma medida não aditiva, calculada como count(distinct
+      sales_order_id). O motivo de venda não está na fato porque é N:N com o pedido; ele
+      entra pela ponte br_order_sales_reason. Fontes: sales_salesorderdetail (itens e
+      medidas) e sales_salesorderheader (atributos do pedido).
     columns:
       - name: sales_order_detail_id
-        description: Chave primária do fato — identifica unicamente a linha de item do pedido.
+        description: >
+          Chave primária da fato. Identificador do item de pedido no ERP
+          (sales_salesorderdetail.salesorderdetailid); único em toda a tabela.
         tests:
           - not_null
           - unique
       - name: sales_order_id
-        description: Degenerate dimension. Identificador do pedido, usado para contar pedidos distintos.
+        description: >
+          Identificador do pedido no ERP (salesorderid). Dimensão degenerada: não aponta
+          para uma dimensão, mas agrupa os itens do mesmo pedido. É a base do número de
+          pedidos, calculado como count(distinct sales_order_id), e a chave de junção com a
+          ponte br_order_sales_reason.
         tests:
           - not_null
       - name: product_key
-        description: FK para dim_product.
+        description: >
+          Chave estrangeira para dim_product (surrogate key md5 de product_id). Identifica o
+          produto vendido no item.
         tests:
           - not_null
           - relationships:
               to: ref('dim_product')
               field: product_key
       - name: customer_key
-        description: FK para dim_customer.
+        description: >
+          Chave estrangeira para dim_customer (surrogate key md5 de customer_id). Cliente
+          que fez o pedido, herdado do cabeçalho.
         tests:
           - not_null
           - relationships:
               to: ref('dim_customer')
               field: customer_key
       - name: credit_card_key
-        description: FK para dim_credit_card (chave -1 = pedido sem cartão).
+        description: >
+          Chave estrangeira para dim_credit_card (surrogate key md5 de credit_card_id).
+          Pedidos sem cartão apontam para o membro N/A (credit_card_id = -1), de modo que a
+          chave nunca é nula.
         tests:
           - not_null
           - relationships:
               to: ref('dim_credit_card')
               field: credit_card_key
       - name: order_status_key
-        description: FK para dim_order_status.
+        description: >
+          Chave estrangeira para dim_order_status (surrogate key md5 de status_code). Status
+          do pedido no momento da carga.
         tests:
           - not_null
           - relationships:
               to: ref('dim_order_status')
               field: order_status_key
       - name: order_date_key
-        description: FK para dim_date (data do pedido).
+        description: >
+          Chave estrangeira para dim_date (surrogate key md5 da data do pedido). Liga o item
+          ao calendário para análises por dia, mês, trimestre e ano.
         tests:
           - not_null
           - relationships:
               to: ref('dim_date')
               field: date_key
       - name: ship_geography_key
-        description: FK para dim_geography (endereço de entrega — cidade/estado/país).
+        description: >
+          Chave estrangeira para dim_geography (surrogate key md5 de ship_to_address_id).
+          Endereço de entrega do pedido; define a cidade, o estado e o país da venda.
         tests:
           - not_null
           - relationships:
               to: ref('dim_geography')
               field: geography_key
       - name: order_date
-        description: Data do pedido (degenerate, para séries temporais diretas).
+        description: >
+          Data do pedido (sales_salesorderheader.orderdate convertida para date). É a "data
+          de venda" do dicionário de dados; fica na fato para séries temporais e filtros de
+          período sem junção com a dim_date.
         tests:
           - not_null
       - name: order_qty
-        description: Quantidade comprada do produto na linha (soma = "quantidade comprada").
+        description: >
+          Quantidade de unidades do produto no item (orderqty). Medida aditiva; a soma é a
+          "quantidade comprada" do dicionário de dados.
         tests:
           - not_null
           - dbt_utils.expression_is_true:
               expression: ">= 0"
       - name: unit_price
-        description: Preço unitário negociado.
+        description: >
+          Preço unitário negociado no item, em US$ (unitprice), antes de descontos. Não é
+          aditivo: para somar valores use gross_amount.
         tests:
           - not_null
       - name: unit_price_discount
-        description: Percentual de desconto aplicado ao item (0 a 1).
+        description: >
+          Percentual de desconto aplicado ao item, como fração entre 0 e 1
+          (unitpricediscount); 0 significa sem desconto. Não é aditivo.
       - name: gross_amount
         description: >
-          Valor total negociado (bruto) = unit_price * order_qty. É a medida
-          "vendas brutas" reconciliada com a auditoria (ver teste de dado).
+          Valor total negociado (bruto) do item, em US$: unit_price × order_qty, antes de
+          descontos. É a medida "valor total negociado" do dicionário de dados e a base do
+          teste de reconciliação com a auditoria (vendas brutas de 2011 = US$
+          12.646.112,16). Medida aditiva.
         tests:
           - not_null
           - dbt_utils.expression_is_true:
               expression: ">= 0"
       - name: discount_amount
-        description: Valor do desconto do item = unit_price * order_qty * unit_price_discount.
+        description: >
+          Valor do desconto concedido no item, em US$: unit_price × order_qty ×
+          unit_price_discount. Medida aditiva.
       - name: net_amount
         description: >
-          Valor total negociado líquido = unit_price * order_qty * (1 - unit_price_discount).
-          Equivale ao linetotal computado do OLTP original (coluna inexistente no port PostgreSQL).
+          Valor total negociado líquido do item, em US$: unit_price × order_qty × (1 −
+          unit_price_discount), o mesmo que gross_amount − discount_amount. É o numerador do
+          ticket médio (valor líquido ÷ número de pedidos). Equivale ao linetotal do ERP
+          original, coluna que não existe na base ingerida. Medida aditiva.
 
   # =========================================================== DIMENSÕES
   - name: dim_product
-    description: Dimensão de produto, enriquecida com subcategoria e categoria.
+    description: >
+      Dimensão de produto: 1 linha por produto do catálogo (504 produtos, dos quais 266 têm
+      vendas). Desnormaliza a hierarquia categoria → subcategoria → produto para análises em
+      qualquer nível. Fontes: production_product, production_productsubcategory e
+      production_productcategory.
     columns:
       - name: product_key
-        description: Chave primária (surrogate) da dimensão de produto.
+        description: >
+          Chave primária da dimensão: surrogate key md5 gerada a partir de product_id. É a
+          chave usada na junção com fct_sales.
         tests:
           - not_null
           - unique
       - name: product_id
-        description: Chave natural do produto (OLTP).
+        description: >
+          Chave natural do produto no ERP (production_product.productid).
         tests:
           - not_null
           - unique
       - name: product_name
-        description: Nome do produto (dimensão "Produto").
+        description: >
+          Nome do produto (production_product.name), por exemplo "Mountain-200 Black, 38". É
+          a dimensão "Produto" do dicionário de dados.
         tests:
           - not_null
       - name: product_number
-        description: Código do produto no OLTP.
+        description: >
+          Código alfanumérico do produto no ERP (productnumber), por exemplo BK-M68B-38.
       - name: color
-        description: Cor do produto.
+        description: >
+          Cor do produto; nula para itens sem cor definida.
       - name: product_line
-        description: Linha do produto (R/M/T/S).
+        description: >
+          Linha do produto: R = Road, M = Mountain, T = Touring, S = Standard; nula quando
+          não se aplica. O espaço à direita que vem da origem é removido na staging.
       - name: subcategory_name
-        description: Subcategoria do produto.
+        description: >
+          Subcategoria do produto (production_productsubcategory.name), por exemplo Mountain
+          Bikes. Nula para os produtos sem subcategoria, que são componentes internos sem
+          venda.
       - name: category_name
-        description: Categoria do produto (Bikes, Components, Clothing, Accessories).
+        description: >
+          Categoria do produto (production_productcategory.name): Bikes, Components,
+          Clothing ou Accessories. Nula quando o produto não tem subcategoria.
       - name: standard_cost
-        description: Custo padrão.
+        description: >
+          Custo padrão do produto, em US$ (standardcost).
       - name: list_price
-        description: Preço de tabela.
+        description: >
+          Preço de tabela do produto, em US$ (listprice). O preço efetivamente negociado em
+          cada venda está em fct_sales.unit_price.
 
   - name: dim_customer
-    description: Dimensão de cliente (pessoa física via person, ou loja via store).
+    description: >
+      Dimensão de cliente: 1 linha por cliente cadastrado no ERP (19.820 clientes, dos quais
+      19.119 têm pedidos). O cliente é uma pessoa física, que compra online, ou uma loja
+      revendedora; o nome vem de person_person para pessoas e de sales_store para lojas.
+      Fontes: sales_customer, person_person e sales_store.
     columns:
       - name: customer_key
-        description: Chave primária (surrogate) da dimensão de cliente.
+        description: >
+          Chave primária da dimensão: surrogate key md5 gerada a partir de customer_id. É a
+          chave usada na junção com fct_sales.
         tests:
           - not_null
           - unique
       - name: customer_id
-        description: Chave natural do cliente (OLTP).
+        description: >
+          Chave natural do cliente no ERP (sales_customer.customerid). Identifica o cliente
+          de forma única; use-a em rankings, porque nomes podem se repetir.
         tests:
           - not_null
           - unique
+      - name: person_id
+        description: >
+          Pessoa associada ao cliente (personid, que aponta para person_person). Em lojas é
+          a pessoa de contato; nula quando o cadastro é apenas da loja.
+      - name: store_id
+        description: >
+          Loja revendedora associada ao cliente (storeid, que aponta para sales_store). Nula
+          para pessoas físicas.
+      - name: territory_id
+        description: >
+          Território de vendas do cliente (territoryid).
       - name: customer_type
-        description: Tipo do cliente — 'Individual' ou 'Store'.
+        description: >
+          Tipo do cliente: Store quando há loja revendedora associada e Individual para
+          pessoa física.
         tests:
           - accepted_values:
               values: ['Individual', 'Store']
       - name: customer_name
         description: >
-          Nome do cliente (dimensão "Cliente"): pessoa física (person.Name) ou,
-          para revendedores, o nome da loja (sales_store.name).
+          Nome do cliente; é a dimensão "Cliente" do dicionário de dados. Para pessoas
+          físicas é o nome completo da pessoa (person_person); para revendedores é o nome da
+          loja (sales_store.name), com o nome do contato como reserva. Clientes diferentes
+          podem ter o mesmo nome: os 19.119 clientes com pedidos têm 19.103 nomes distintos.
       - name: first_name
-        description: Primeiro nome.
+        description: >
+          Primeiro nome da pessoa associada ao cliente (person_person.firstname); nulo se
+          não houver pessoa.
       - name: last_name
-        description: Sobrenome.
-      - name: territory_id
-        description: Território de vendas do cliente.
+        description: >
+          Sobrenome da pessoa associada ao cliente (person_person.lastname); nulo se não
+          houver pessoa.
 
   - name: dim_credit_card
-    description: Dimensão de cartão de crédito (tipo/bandeira). Inclui membro 'N/A' (chave -1).
+    description: >
+      Dimensão de cartão de crédito: 1 linha por cartão cadastrado, mais o membro N/A
+      (credit_card_id = -1) para os pedidos sem cartão, o que garante a integridade
+      referencial com a fato. Fonte: sales_creditcard.
     columns:
       - name: credit_card_key
-        description: Chave primária (surrogate) da dimensão de cartão.
+        description: >
+          Chave primária da dimensão: surrogate key md5 gerada a partir de credit_card_id.
         tests:
           - not_null
           - unique
       - name: credit_card_id
-        description: Chave natural do cartão (-1 = desconhecido).
+        description: >
+          Chave natural do cartão no ERP (creditcardid). O valor -1 identifica o membro N/A,
+          criado no dbt para os pedidos sem cartão.
         tests:
           - not_null
           - unique
       - name: card_type
-        description: Tipo do cartão (dimensão "Tipo de cartão").
+        description: >
+          Tipo (bandeira) do cartão: SuperiorCard, Distinguish, ColonialVoice ou Vista; N/A
+          para pedidos sem cartão. É a dimensão "Tipo de cartão" das perguntas de negócio.
         tests:
           - not_null
 
   - name: dim_sales_reason
-    description: Dimensão de motivo de venda (Promotion, Price, etc.).
+    description: >
+      Dimensão de motivo de venda: 1 linha por motivo cadastrado no ERP (10 motivos, dos
+      quais 7 aparecem em pedidos). Liga-se aos pedidos pela ponte br_order_sales_reason,
+      porque um pedido pode ter vários motivos. Fonte: sales_salesreason.
     columns:
       - name: sales_reason_key
-        description: Chave primária (surrogate) da dimensão de motivo de venda.
+        description: >
+          Chave primária da dimensão: surrogate key md5 gerada a partir de sales_reason_id.
         tests:
           - not_null
           - unique
       - name: sales_reason_id
-        description: Chave natural do motivo de venda (OLTP).
+        description: >
+          Chave natural do motivo de venda no ERP (salesreasonid).
         tests:
           - not_null
           - unique
       - name: sales_reason_name
-        description: Nome do motivo de venda (dimensão "Motivo de venda").
+        description: >
+          Nome do motivo de venda; é a dimensão "Motivo de venda" do dicionário de dados.
+          Valores: Price, On Promotion, Magazine Advertisement, Television Advertisement,
+          Manufacturer, Review, Demo Event, Sponsorship, Quality e Other. O motivo da
+          pergunta de negócio 4f ("Promotion") chama-se On Promotion. A staging remove
+          espaços repetidos: a origem grava "Television Advertisement" com dois espaços.
         tests:
           - not_null
+          - accepted_values:
+              values:
+                - Price
+                - On Promotion
+                - Magazine Advertisement
+                - Television Advertisement
+                - Manufacturer
+                - Review
+                - Demo Event
+                - Sponsorship
+                - Quality
+                - Other
       - name: reason_type
-        description: Categoria do motivo (Marketing, Other, etc.).
+        description: >
+          Agrupamento do motivo no ERP (reasontype): Marketing, Promotion ou Other.
+          Promotion é o tipo do motivo On Promotion, o único desse grupo.
+        tests:
+          - accepted_values:
+              values: ['Marketing', 'Promotion', 'Other']
 
   - name: dim_order_status
-    description: Dimensão derivada que decodifica o status numérico do pedido.
+    description: >
+      Dimensão de status do pedido: decodifica o código numérico do ERP
+      (sales_salesorderheader.status) em um rótulo legível. Contém os 6 status possíveis,
+      embora todos os pedidos da base atual estejam com o status 5 (Shipped).
     columns:
       - name: order_status_key
-        description: Chave primária (surrogate) da dimensão de status.
+        description: >
+          Chave primária da dimensão: surrogate key md5 gerada a partir de status_code.
         tests:
           - not_null
           - unique
       - name: status_code
-        description: Código numérico do status (1..6).
+        description: >
+          Código do status do pedido no ERP, de 1 a 6.
         tests:
           - not_null
           - unique
       - name: status_name
-        description: Rótulo legível do status (dimensão "Status").
+        description: >
+          Rótulo do status: In process (1), Approved (2), Backordered (3), Rejected (4),
+          Shipped (5) ou Cancelled (6). É a dimensão "Status" das perguntas de negócio.
         tests:
           - not_null
 
   - name: dim_geography
     description: >
-      Dimensão de geografia (endereço → estado → país). Grão = endereço.
-      Fornece cidade, estado e país para as análises de vendas.
+      Dimensão de geografia: 1 linha por endereço cadastrado (19.614 endereços em 613
+      cidades de 6 países), com cidade, estado e país desnormalizados. A fato aponta para o
+      endereço de entrega do pedido. Fontes: person_address, person_stateprovince e
+      person_countryregion.
     columns:
       - name: geography_key
-        description: Chave primária (surrogate) da dimensão de geografia.
+        description: >
+          Chave primária da dimensão: surrogate key md5 gerada a partir de address_id. É a
+          chave usada na junção com fct_sales.ship_geography_key.
         tests:
           - not_null
           - unique
       - name: address_id
-        description: Chave natural do endereço (OLTP).
+        description: >
+          Chave natural do endereço no ERP (person_address.addressid).
         tests:
           - not_null
           - unique
       - name: city
-        description: Cidade (dimensão "Cidade").
+        description: >
+          Cidade do endereço (person_address.city); é a dimensão "Cidade" do dicionário de
+          dados. Existem cidades homônimas em estados diferentes: combine com o estado e o
+          país para identificar uma cidade.
+      - name: postal_code
+        description: >
+          Código postal do endereço (postalcode).
       - name: state_province_name
-        description: Estado/província (dimensão "Estado").
+        description: >
+          Nome do estado ou província (person_stateprovince.name); é a dimensão "Estado" do
+          dicionário de dados.
+      - name: state_province_code
+        description: >
+          Sigla do estado ou província (stateprovincecode), por exemplo CA.
       - name: country_region_name
-        description: País/região (dimensão "País").
+        description: >
+          Nome do país em inglês (person_countryregion.name), por exemplo United States; é a
+          dimensão "País" do dicionário de dados.
+      - name: country_region_code
+        description: >
+          Código ISO de duas letras do país (countryregioncode), por exemplo US. O código
+          NA, da Namíbia, chega nulo da ingestão e é restaurado na staging.
 
   - name: dim_date
-    description: Dimensão de calendário gerada, cobrindo 2011-01-01 a 2014-12-31.
+    description: >
+      Dimensão de calendário: 1 linha por dia, de 2011-01-01 a 2014-12-31 (1.461 dias). É
+      gerada no dbt com dbt_utils.date_spine, porque o ERP não tem tabela de datas, e cobre
+      todo o período de vendas (2011-05-31 a 2014-06-30).
     columns:
       - name: date_key
-        description: Chave primária (surrogate) da dimensão de data.
+        description: >
+          Chave primária da dimensão: surrogate key md5 gerada a partir de date_day. É a
+          chave usada na junção com fct_sales.order_date_key.
         tests:
           - not_null
           - unique
       - name: date_day
-        description: Data (dia). Dimensão "Data de venda".
+        description: >
+          Data do calendário (tipo date). Ligada a fct_sales.order_date_key, é a dimensão
+          "Data de venda" do dicionário de dados.
         tests:
           - not_null
           - unique
       - name: year_number
-        description: Ano.
+        description: >
+          Ano da data, por exemplo 2013.
       - name: quarter_number
-        description: Trimestre (1..4).
+        description: >
+          Trimestre do ano, de 1 a 4.
       - name: month_number
-        description: Mês (1..12).
+        description: >
+          Mês do ano, de 1 (janeiro) a 12 (dezembro).
       - name: month_name
-        description: Nome do mês.
+        description: >
+          Nome do mês em inglês (January a December), no formato do warehouse.
       - name: year_month
-        description: Ano-mês (yyyy-MM), útil para séries temporais.
+        description: >
+          Ano e mês no formato yyyy-MM, por exemplo 2013-07. Ordena corretamente como texto
+          e é o eixo das séries temporais mensais.
+      - name: day_of_month
+        description: >
+          Dia do mês, de 1 a 31.
+      - name: day_of_week
+        description: >
+          Dia da semana como número, de 1 (domingo) a 7 (sábado).
+      - name: day_name
+        description: >
+          Nome do dia da semana em inglês (Sunday a Saturday).
 
   # =========================================================== PONTE
   - name: br_order_sales_reason
     description: >
-      Tabela-ponte M:N entre pedidos e motivos de venda. Usar no BI apenas ao
-      filtrar/agrupar por motivo de venda (join com fct_sales por sales_order_id).
+      Tabela-ponte N:N entre pedidos e motivos de venda: 1 linha por combinação de pedido e
+      motivo (27.647 linhas). Dos 31.465 pedidos, 23.012 têm motivo e 4.482 têm mais de um;
+      pedidos de revendedores não têm motivo informado. Use apenas para filtrar ou agrupar
+      por motivo: juntar a fato com a ponte sem filtrar um único motivo repete os itens dos
+      pedidos com vários motivos e infla as medidas. Fonte:
+      sales_salesorderheadersalesreason.
     columns:
       - name: sales_order_id
-        description: FK para o pedido (fct_sales.sales_order_id).
+        description: >
+          Identificador do pedido no ERP. É a chave de junção com fct_sales.sales_order_id.
         tests:
           - not_null
       - name: sales_reason_key
-        description: FK para dim_sales_reason.
+        description: >
+          Chave estrangeira para dim_sales_reason (surrogate key md5 de sales_reason_id).
         tests:
           - not_null
           - relationships:
               to: ref('dim_sales_reason')
               field: sales_reason_key
+      - name: sales_reason_id
+        description: >
+          Chave natural do motivo de venda no ERP (salesreasonid).
     tests:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns:
             - sales_order_id
             - sales_reason_key
 
-  # =========================================================== REPORTING (BI)
+  # =========================================================== CONSUMO (BI)
   - name: rpt_sales
     description: >
-      Tabela larga (one big table) para o BI, no grão de item de pedido, com a fato
-      já unida a todas as dimensões. Totais EXATOS (sem fan-out): reconcilia com a
-      auditoria. O motivo de venda aparece só como lista concatenada informativa
-      (sales_reasons); para análises por motivo use rpt_sales_by_reason.
+      Tabela larga de consumo para o BI: a fct_sales já unida a todas as dimensões, no mesmo
+      grão (1 linha por item de pedido, 121.317 linhas). Os totais são exatos, sem fan-out:
+      um teste garante que a contagem de linhas e o valor bruto são iguais aos da fato, e
+      por isso reconciliam com a auditoria. É a fonte do painel de vendas. O motivo de venda
+      aparece apenas como lista concatenada (sales_reasons), por ser N:N com o pedido; para
+      análises por motivo use rpt_sales_by_reason.
     columns:
       - name: sales_order_detail_id
-        description: Chave primária (item de pedido).
-        tests: [not_null, unique]
+        description: >
+          Chave primária: identificador do item de pedido no ERP, o mesmo de fct_sales. Há
+          exatamente uma linha por item.
+        tests:
+          - not_null
+          - unique
       - name: sales_order_id
-        description: Identificador do pedido (count distinct = nº de pedidos).
-        tests: [not_null]
+        description: >
+          Identificador do pedido no ERP. O número de pedidos é count(distinct
+          sales_order_id).
+        tests:
+          - not_null
       - name: order_date
-        description: Data do pedido.
+        description: >
+          Data do pedido (data de venda), tipo date.
+      - name: year_number
+        description: >
+          Ano da data do pedido, por exemplo 2013.
+      - name: quarter_number
+        description: >
+          Trimestre da data do pedido, de 1 a 4.
+      - name: month_number
+        description: >
+          Mês da data do pedido, de 1 a 12.
+      - name: month_name
+        description: >
+          Nome do mês da data do pedido, em inglês.
       - name: year_month
-        description: Ano-mês (yyyy-MM) para séries temporais.
+        description: >
+          Ano e mês da data do pedido no formato yyyy-MM, por exemplo 2013-07; eixo das
+          séries temporais mensais.
+      - name: product_id
+        description: >
+          Chave natural do produto no ERP.
       - name: product_name
-        description: Produto.
+        description: >
+          Nome do produto vendido no item.
+      - name: subcategory_name
+        description: >
+          Subcategoria do produto, por exemplo Mountain Bikes.
       - name: category_name
-        description: Categoria do produto.
+        description: >
+          Categoria do produto: Bikes, Components, Clothing ou Accessories.
+      - name: customer_id
+        description: >
+          Chave natural do cliente no ERP. Identifica o cliente de forma única, já que nomes
+          podem se repetir.
       - name: customer_name
-        description: Cliente (pessoa física ou nome da loja revendedora).
+        description: >
+          Nome do cliente: nome completo para pessoas físicas e nome da loja para
+          revendedores.
+      - name: customer_type
+        description: >
+          Tipo do cliente: Individual (pessoa física) ou Store (loja revendedora).
       - name: card_type
-        description: Tipo de cartão (N/A = sem cartão).
+        description: >
+          Tipo do cartão de crédito do pedido; N/A quando o pedido não foi pago com cartão.
+      - name: status_code
+        description: >
+          Código do status do pedido no ERP, de 1 a 6.
       - name: status_name
-        description: Status do pedido.
+        description: >
+          Rótulo do status do pedido, por exemplo Shipped.
       - name: city
-        description: Cidade de entrega.
+        description: >
+          Cidade do endereço de entrega do pedido.
       - name: state_province_name
-        description: Estado de entrega.
+        description: >
+          Estado ou província do endereço de entrega do pedido.
       - name: country_region_name
-        description: País de entrega.
+        description: >
+          País do endereço de entrega do pedido.
       - name: sales_reasons
-        description: Lista concatenada dos motivos de venda do pedido (informativo).
+        description: >
+          Lista dos motivos de venda do pedido em ordem alfabética, separados por vírgula,
+          por exemplo "On Promotion, Price"; "Sem motivo informado" quando o pedido não tem
+          motivo. Campo informativo: para filtrar ou agrupar por motivo use
+          rpt_sales_by_reason.
+      - name: n_sales_reasons
+        description: >
+          Quantidade de motivos de venda do pedido; 0 quando não há motivo informado.
+      - name: order_qty
+        description: >
+          Quantidade de unidades do produto no item. A soma é a quantidade comprada.
+      - name: unit_price
+        description: >
+          Preço unitário negociado, em US$, antes de descontos. Não é aditivo.
+      - name: unit_price_discount
+        description: >
+          Percentual de desconto do item, como fração entre 0 e 1. Não é aditivo.
       - name: gross_amount
-        description: Valor total negociado (bruto).
-        tests: [not_null]
+        description: >
+          Valor total negociado (bruto) do item, em US$: unit_price × order_qty. A soma é o
+          valor total negociado.
+        tests:
+          - not_null
+      - name: discount_amount
+        description: >
+          Valor do desconto do item, em US$: gross_amount × unit_price_discount.
       - name: net_amount
-        description: Valor total negociado líquido (bruto − desconto).
+        description: >
+          Valor líquido do item, em US$: gross_amount − discount_amount. A soma dividida
+          pelo número de pedidos é o ticket médio.
 
   - name: rpt_sales_by_reason
     description: >
-      Grão item de pedido × motivo de venda. Um pedido com N motivos gera N linhas
-      (fan-out intencional). Usar apenas para análises POR motivo ou FILTRADAS por
-      motivo (ex.: item 4f). Não somar totais sem filtrar por motivo.
+      Tabela de consumo para análises por motivo de venda. Grão: 1 linha por item de pedido
+      e motivo (64.515 linhas), resultado da junção de rpt_sales com a ponte
+      br_order_sales_reason. Um pedido com N motivos gera N linhas por item (fan-out
+      intencional) e pedidos sem motivo não aparecem. Use apenas agrupando ou filtrando por
+      sales_reason_name: com um único motivo filtrado, por exemplo On Promotion na pergunta
+      4f, cada item conta uma vez e os números são exatos; somar todas as linhas sem filtro
+      superestima os totais.
     columns:
       - name: sales_reason_name
-        description: Motivo de venda (Promotion, Price, Manufacturer, ...).
-        tests: [not_null]
+        description: >
+          Motivo de venda do pedido (dim_sales_reason.sales_reason_name), por exemplo Price
+          ou On Promotion. É a coluna pela qual esta tabela deve ser filtrada ou agrupada.
+        tests:
+          - not_null
+      - name: reason_type
+        description: >
+          Agrupamento do motivo no ERP: Marketing, Promotion ou Other.
       - name: sales_order_detail_id
-        description: Item de pedido.
-        tests: [not_null]
+        description: >
+          Identificador do item de pedido no ERP. Não é único nesta tabela: repete-se uma
+          vez para cada motivo do pedido. A combinação com sales_reason_name é única.
+        tests:
+          - not_null
+      - name: sales_order_id
+        description: >
+          Identificador do pedido no ERP. O número de pedidos é count(distinct
+          sales_order_id).
+      - name: order_date
+        description: >
+          Data do pedido (data de venda), tipo date.
+      - name: year_number
+        description: >
+          Ano da data do pedido, por exemplo 2013.
+      - name: quarter_number
+        description: >
+          Trimestre da data do pedido, de 1 a 4.
+      - name: month_number
+        description: >
+          Mês da data do pedido, de 1 a 12.
+      - name: month_name
+        description: >
+          Nome do mês da data do pedido, em inglês.
+      - name: year_month
+        description: >
+          Ano e mês da data do pedido no formato yyyy-MM, por exemplo 2013-07; eixo das
+          séries temporais mensais.
+      - name: product_id
+        description: >
+          Chave natural do produto no ERP.
+      - name: product_name
+        description: >
+          Nome do produto vendido no item.
+      - name: subcategory_name
+        description: >
+          Subcategoria do produto, por exemplo Mountain Bikes.
+      - name: category_name
+        description: >
+          Categoria do produto: Bikes, Components, Clothing ou Accessories.
+      - name: customer_id
+        description: >
+          Chave natural do cliente no ERP. Identifica o cliente de forma única, já que nomes
+          podem se repetir.
+      - name: customer_name
+        description: >
+          Nome do cliente: nome completo para pessoas físicas e nome da loja para
+          revendedores.
+      - name: customer_type
+        description: >
+          Tipo do cliente: Individual (pessoa física) ou Store (loja revendedora).
+      - name: card_type
+        description: >
+          Tipo do cartão de crédito do pedido; N/A quando o pedido não foi pago com cartão.
+      - name: status_code
+        description: >
+          Código do status do pedido no ERP, de 1 a 6.
+      - name: status_name
+        description: >
+          Rótulo do status do pedido, por exemplo Shipped.
+      - name: city
+        description: >
+          Cidade do endereço de entrega do pedido.
+      - name: state_province_name
+        description: >
+          Estado ou província do endereço de entrega do pedido.
+      - name: country_region_name
+        description: >
+          País do endereço de entrega do pedido.
+      - name: sales_reasons
+        description: >
+          Lista dos motivos de venda do pedido em ordem alfabética, separados por vírgula,
+          por exemplo "On Promotion, Price"; "Sem motivo informado" quando o pedido não tem
+          motivo. Campo informativo: para filtrar ou agrupar por motivo use
+          rpt_sales_by_reason.
+      - name: n_sales_reasons
+        description: >
+          Quantidade de motivos de venda do pedido; 0 quando não há motivo informado.
+      - name: order_qty
+        description: >
+          Quantidade de unidades do produto no item. A soma é a quantidade comprada. Nesta
+          tabela o valor se repete em cada motivo do pedido: some apenas dentro de um
+          motivo.
+      - name: unit_price
+        description: >
+          Preço unitário negociado, em US$, antes de descontos. Não é aditivo.
+      - name: unit_price_discount
+        description: >
+          Percentual de desconto do item, como fração entre 0 e 1. Não é aditivo.
+      - name: gross_amount
+        description: >
+          Valor total negociado (bruto) do item, em US$: unit_price × order_qty. A soma é o
+          valor total negociado. Nesta tabela o valor se repete em cada motivo do pedido:
+          some apenas dentro de um motivo.
+      - name: discount_amount
+        description: >
+          Valor do desconto do item, em US$: gross_amount × unit_price_discount. Nesta
+          tabela o valor se repete em cada motivo do pedido: some apenas dentro de um
+          motivo.
+      - name: net_amount
+        description: >
+          Valor líquido do item, em US$: gross_amount − discount_amount. A soma dividida
+          pelo número de pedidos é o ticket médio. Nesta tabela o valor se repete em cada
+          motivo do pedido: some apenas dentro de um motivo.
     tests:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns:

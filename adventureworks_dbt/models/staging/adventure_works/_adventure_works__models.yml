@@ -1,0 +1,221 @@
+version: 2
+
+# Camada de staging: 1 view por tabela-fonte, sem joins. Aqui os nomes passam para
+# snake_case, os tipos são fixados e os defeitos da ingestão são corrigidos, para que
+# os marts nunca precisem conhecer as particularidades da origem.
+# As chaves são testadas nas sources (dados brutos) e nos marts (dados entregues).
+
+models:
+  - name: stg_adventure_works__sales_order_header
+    description: >
+      Cabeçalho do pedido de venda, 1 linha por pedido (sales_salesorderheader).
+      Converte as chaves para bigint, porque a ingestão entrega como double as colunas de
+      inteiros que contêm nulos, e as datas para date.
+    columns:
+      - name: sales_order_id
+        description: Identificador do pedido no ERP (salesorderid), convertido para bigint.
+      - name: customer_id
+        description: Cliente que fez o pedido (customerid).
+      - name: salesperson_id
+        description: Vendedor responsável pelo pedido (salespersonid); nulo em pedidos online.
+      - name: territory_id
+        description: Território de vendas do pedido (territoryid).
+      - name: bill_to_address_id
+        description: Endereço de cobrança do pedido (billtoaddressid).
+      - name: ship_to_address_id
+        description: Endereço de entrega do pedido (shiptoaddressid); define a geografia da venda.
+      - name: credit_card_id
+        description: >
+          Cartão de crédito usado no pedido (creditcardid); nulo quando não houve pagamento
+          com cartão. O cast para bigint evita que o valor 5.0 gere uma surrogate key
+          diferente da do cartão 5.
+      - name: order_date
+        description: Data do pedido (orderdate) convertida de texto para date; é a data de venda.
+      - name: due_date
+        description: Data prevista de entrega (duedate), como date.
+      - name: ship_date
+        description: Data de envio (shipdate), como date.
+      - name: status_code
+        description: Código do status do pedido (status), de 1 a 6, como inteiro.
+      - name: is_online_order
+        description: Verdadeiro quando o pedido foi feito online (onlineorderflag).
+      - name: subtotal
+        description: Soma dos itens após descontos, em US$ (subtotal). Mantida para reconciliação.
+      - name: tax_amount
+        description: Imposto do pedido, em US$ (taxamt).
+      - name: freight
+        description: Frete do pedido, em US$ (freight).
+      - name: total_due
+        description: Total devido pelo cliente, em US$ (totaldue).
+
+  - name: stg_adventure_works__sales_order_detail
+    description: >
+      Itens do pedido de venda, 1 linha por produto dentro de um pedido
+      (sales_salesorderdetail). Fixa os tipos das chaves e das medidas. A coluna linetotal
+      do ERP original não existe na base ingerida; a fato recalcula o valor líquido.
+    columns:
+      - name: sales_order_detail_id
+        description: Identificador do item de pedido (salesorderdetailid), como bigint.
+      - name: sales_order_id
+        description: Pedido ao qual o item pertence (salesorderid).
+      - name: product_id
+        description: Produto vendido no item (productid).
+      - name: special_offer_id
+        description: Oferta especial aplicada ao item (specialofferid).
+      - name: order_qty
+        description: Quantidade de unidades no item (orderqty), como inteiro.
+      - name: unit_price
+        description: Preço unitário negociado, em US$ (unitprice), como decimal(19,4).
+      - name: unit_price_discount
+        description: Percentual de desconto do item, fração entre 0 e 1 (unitpricediscount).
+
+  - name: stg_adventure_works__customer
+    description: >
+      Cadastro de clientes, 1 linha por cliente (sales_customer). As chaves person_id e
+      store_id contêm nulos e chegam como double, por isso são convertidas para bigint.
+    columns:
+      - name: customer_id
+        description: Identificador do cliente (customerid).
+      - name: person_id
+        description: Pessoa associada ao cliente (personid); nula quando o cadastro é só da loja.
+      - name: store_id
+        description: Loja revendedora associada ao cliente (storeid); nula para pessoas físicas.
+      - name: territory_id
+        description: Território de vendas do cliente (territoryid).
+
+  - name: stg_adventure_works__store
+    description: Lojas revendedoras, 1 linha por loja (sales_store). Fornece o nome dos clientes do tipo Store.
+    columns:
+      - name: business_entity_id
+        description: Identificador da loja (businessentityid); é o store_id do cadastro de clientes.
+      - name: store_name
+        description: Nome da loja revendedora (name).
+      - name: salesperson_id
+        description: Vendedor responsável pela conta da loja (salespersonid).
+
+  - name: stg_adventure_works__person
+    description: >
+      Pessoas cadastradas no ERP, 1 linha por pessoa (person_person). Monta o nome completo
+      usado como nome do cliente pessoa física.
+    columns:
+      - name: business_entity_id
+        description: Identificador da pessoa (businessentityid); é o person_id do cadastro de clientes.
+      - name: person_type
+        description: Tipo da pessoa no ERP (persontype), por exemplo IN = cliente pessoa física e SC = contato de loja.
+      - name: first_name
+        description: Primeiro nome (firstname).
+      - name: middle_name
+        description: Nome do meio (middlename); nulo para a maioria das pessoas.
+      - name: last_name
+        description: Sobrenome (lastname).
+      - name: full_name
+        description: >
+          Nome completo: primeiro nome, nome do meio e sobrenome separados por espaço.
+          Nomes do meio nulos são ignorados, sem deixar espaço duplo.
+
+  - name: stg_adventure_works__credit_card
+    description: Cartões de crédito, 1 linha por cartão (sales_creditcard).
+    columns:
+      - name: credit_card_id
+        description: Identificador do cartão (creditcardid), como bigint.
+      - name: card_type
+        description: Tipo (bandeira) do cartão (cardtype); SuperiorCard, Distinguish, ColonialVoice ou Vista.
+
+  - name: stg_adventure_works__sales_reason
+    description: >
+      Motivos de venda, 1 linha por motivo (sales_salesreason). Normaliza os espaços do
+      nome, porque a origem grava "Television  Advertisement" com dois espaços.
+    columns:
+      - name: sales_reason_id
+        description: Identificador do motivo de venda (salesreasonid).
+      - name: sales_reason_name
+        description: >
+          Nome do motivo de venda (name), sem espaços repetidos nem nas pontas.
+          Exemplos: Price, On Promotion, Manufacturer.
+      - name: reason_type
+        description: Agrupamento do motivo (reasontype); Marketing, Promotion ou Other.
+
+  - name: stg_adventure_works__sales_order_header_sales_reason
+    description: >
+      Associação N:N entre pedidos e motivos de venda, 1 linha por pedido e motivo
+      (sales_salesorderheadersalesreason). Base da tabela-ponte br_order_sales_reason.
+    columns:
+      - name: sales_order_id
+        description: Pedido (salesorderid).
+      - name: sales_reason_id
+        description: Motivo de venda atribuído ao pedido (salesreasonid).
+
+  - name: stg_adventure_works__product
+    description: >
+      Catálogo de produtos, 1 linha por produto (production_product). Fixa os tipos das
+      chaves e dos valores e remove o espaço à direita da linha do produto.
+    columns:
+      - name: product_id
+        description: Identificador do produto (productid), como bigint.
+      - name: product_name
+        description: Nome do produto (name).
+      - name: product_number
+        description: Código alfanumérico do produto no ERP (productnumber).
+      - name: product_subcategory_id
+        description: Subcategoria do produto (productsubcategoryid); nula para produtos sem subcategoria.
+      - name: color
+        description: Cor do produto; nula quando não se aplica.
+      - name: product_line
+        description: Linha do produto (productline) sem espaços; R = Road, M = Mountain, T = Touring, S = Standard.
+      - name: standard_cost
+        description: Custo padrão, em US$ (standardcost), como decimal(19,4).
+      - name: list_price
+        description: Preço de tabela, em US$ (listprice), como decimal(19,4).
+
+  - name: stg_adventure_works__product_subcategory
+    description: Subcategorias de produto, 1 linha por subcategoria (production_productsubcategory).
+    columns:
+      - name: product_subcategory_id
+        description: Identificador da subcategoria (productsubcategoryid).
+      - name: product_category_id
+        description: Categoria à qual a subcategoria pertence (productcategoryid).
+      - name: subcategory_name
+        description: Nome da subcategoria (name), por exemplo Mountain Bikes.
+
+  - name: stg_adventure_works__product_category
+    description: Categorias de produto, 1 linha por categoria (production_productcategory).
+    columns:
+      - name: product_category_id
+        description: Identificador da categoria (productcategoryid).
+      - name: category_name
+        description: Nome da categoria (name); Bikes, Components, Clothing ou Accessories.
+
+  - name: stg_adventure_works__address
+    description: Endereços, 1 linha por endereço (person_address). Origem da cidade das vendas.
+    columns:
+      - name: address_id
+        description: Identificador do endereço (addressid).
+      - name: city
+        description: Nome da cidade (city).
+      - name: state_province_id
+        description: Estado ou província do endereço (stateprovinceid).
+      - name: postal_code
+        description: Código postal (postalcode).
+
+  - name: stg_adventure_works__state_province
+    description: Estados e províncias, 1 linha por estado (person_stateprovince).
+    columns:
+      - name: state_province_id
+        description: Identificador do estado ou província (stateprovinceid).
+      - name: state_province_code
+        description: Sigla do estado ou província (stateprovincecode), por exemplo CA.
+      - name: state_province_name
+        description: Nome do estado ou província (name).
+      - name: country_region_code
+        description: Código do país ao qual o estado pertence (countryregioncode).
+
+  - name: stg_adventure_works__country_region
+    description: >
+      Países, 1 linha por país (person_countryregion). Corrige o defeito da ingestão que
+      transformou o código "NA" da Namíbia em nulo: o código é restaurado a partir do nome
+      do país e qualquer linha ainda sem código é descartada.
+    columns:
+      - name: country_region_code
+        description: Código ISO de duas letras do país (countryregioncode), com o código da Namíbia restaurado.
+      - name: country_region_name
+        description: Nome do país em inglês (name), por exemplo United States.

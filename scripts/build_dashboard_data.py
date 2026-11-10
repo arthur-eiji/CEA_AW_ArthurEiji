@@ -1,163 +1,190 @@
 #!/usr/bin/env python3
 """
-Compacta o export da mart `rpt_sales` (CSV, ~24 MB) em um JSON leve e
-dicionário-codificado para o painel web (docs/index.html).
+Compacta a extração da tabela de consumo `rpt_sales` em um JSON leve para o painel
+de vendas (docs/index.html).
+
+A extração mantém o grão da fato (1 linha por item de pedido) e o painel agrega no
+navegador. Para caber em poucos MB, os textos viram dicionários (cada valor distinto
+é gravado uma vez) e as linhas guardam só índices e medidas.
+
+Entrada (detectada pelo conteúdo do arquivo):
+  - JSON gerado por `dbt show --output json` a partir da análise
+    adventureworks_dbt/analyses/painel_export_rpt_sales.sql (caminho recomendado); ou
+  - CSV exportado do SQL Editor do Databricks com as mesmas colunas.
+
+Uso, a partir da pasta adventureworks_dbt:
+  dbt show --quiet --select painel_export_rpt_sales --limit 200000 --output json > /tmp/rpt_sales.json
+  python3 ../scripts/build_dashboard_data.py /tmp/rpt_sales.json ../docs/data/sales.json
 
 Estrutura de saída:
-  dates[]           -> 'YYYY-MM-DD'
-  categories[], subcategories[]
-  products[]        -> [nome, subcategoria_idx, categoria_idx]
-  customer_types[], customers[] -> [nome, tipo_idx]
-  card_types[], statuses[], countries[], states[]
-  geos[]            -> [cidade, estado_idx, pais_idx]
-  reasons[]         -> nomes dos motivos de venda (bitmask por pedido)
-  orders[]          -> [date_idx, order_id, customer_idx, card_idx, status_idx, geo_idx, reasons_mask]
-  lines[]           -> [order_idx, product_idx, qty, gross, net]
+  meta            informações da extração e totais de conferência
+  dates[]         datas dos pedidos, 'AAAA-MM-DD', em ordem cronológica
+  categories[], subcategories[], customer_types[], card_types[], statuses[],
+  countries[], states[], reasons[]            dicionários de texto
+  products[]      [nome, subcategoria_idx, categoria_idx, product_id]
+  customers[]     [nome, tipo_idx, customer_id]
+  geos[]          [cidade, estado_idx, pais_idx]
+  orders[]        [data_idx, sales_order_id, cliente_idx, cartao_idx, status_idx,
+                   geo_idx, mascara_de_motivos]
+  lines[]         [pedido_idx, produto_idx, quantidade, valor_bruto, valor_liquido]
 
-Uso:
-  python3 -I scripts/build_dashboard_data.py docs/rpt_sales.csv docs/data/sales.json
+A máscara de motivos é um inteiro em que o bit i indica que o pedido tem o motivo
+reasons[i]; um pedido pode ter vários motivos e a máscara 0 significa "sem motivo".
 """
 import csv
 import json
+import math
 import os
 import sys
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import datetime
+
+NO_REASON = "Sem motivo informado"
+REQUIRED = [
+    "sales_order_id", "order_date", "product_name", "subcategory_name", "category_name",
+    "customer_name", "customer_type", "card_type", "status_name", "city",
+    "state_province_name", "country_region_name", "sales_reasons",
+    "order_qty", "gross_amount", "net_amount",
+]
 
 
-class Dict:
-    """Codificador de dicionário: valor -> índice inteiro estável."""
-
-    def __init__(self):
-        self.idx = {}
-        self.vals = []
-
-    def get(self, value):
-        i = self.idx.get(value)
-        if i is None:
-            i = len(self.vals)
-            self.idx[value] = i
-            self.vals.append(value)
-        return i
+def read_rows(path):
+    """Lê a extração (JSON do `dbt show` ou CSV) como lista de dicionários."""
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    start = text.find("{")
+    if start != -1 and '"show"' in text[start:start + 4000] or text.lstrip().startswith("{"):
+        return json.loads(text[start:])["show"]
+    return list(csv.DictReader(text.splitlines()))
 
 
-def num(text):
-    """Converte '3578.270000' em 3578.27 sem lixo de ponto flutuante."""
-    d = Decimal(text).normalize()
-    return int(d) if d == d.to_integral_value() else float(d)
+def iso_date(value):
+    """Aceita 'AAAA-MM-DD', 'AAAAMMDD' ou data com hora e devolve 'AAAA-MM-DD'."""
+    s = str(value).strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:]}"
+    return s[:10]
+
+
+def number(value):
+    """Converte para número sem ruído de ponto flutuante (3578.270000 -> 3578.27)."""
+    x = round(float(value), 6)
+    return int(x) if x == int(x) else x
+
+
+def index_of(values):
+    """Dicionário ordenado: lista de valores distintos e mapa valor -> índice."""
+    ordered = sorted(values)
+    return ordered, {v: i for i, v in enumerate(ordered)}
 
 
 def main(src, dst):
-    d_date, d_cat, d_subcat, d_ctype, d_card = Dict(), Dict(), Dict(), Dict(), Dict()
-    d_status, d_country, d_state, d_reason = Dict(), Dict(), Dict(), Dict()
-    d_prod, d_cust, d_geo = Dict(), Dict(), Dict()
-    products, customers, geos = [], [], []
-    order_index = {}
-    orders, lines = [], []
-    gross_2011 = Decimal(0)
+    rows = read_rows(src)
+    if not rows:
+        sys.exit("Extração vazia.")
+    missing = [c for c in REQUIRED if c not in rows[0]]
+    if missing:
+        sys.exit(f"Colunas ausentes na extração: {missing}")
+    has_ids = "customer_id" in rows[0] and "product_id" in rows[0]
 
-    with open(src, newline='', encoding='utf-8') as f:
-        for row in csv.DictReader(f):
-            # ---- data: aceita 'YYYY-MM-DD' ou 'YYYYMMDD' (export alternativo) e normaliza
-            raw_date = row['order_date'].strip()
-            if len(raw_date) == 8 and raw_date.isdigit():
-                order_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
-            else:
-                order_date = raw_date[:10]
-            row['order_date'] = order_date
+    # ---- normalização linha a linha
+    for r in rows:
+        r["order_date"] = iso_date(r["order_date"])
+        r["sales_order_id"] = int(r["sales_order_id"])
+        r["subcategory_name"] = r["subcategory_name"] or "Sem subcategoria"
+        r["category_name"] = r["category_name"] or "Sem categoria"
+        r["customer_name"] = r["customer_name"] or "(cliente sem nome)"
+        reasons = str(r["sales_reasons"] or "")
+        r["_reasons"] = [] if reasons in ("", NO_REASON) else [x.strip() for x in reasons.split(", ")]
+        # identidade: ID do ERP quando a extração traz; senão o nome
+        r["_cust"] = int(r["customer_id"]) if has_ids else r["customer_name"]
+        r["_prod"] = int(r["product_id"]) if has_ids else r["product_name"]
+        r["_geo"] = (r["country_region_name"], r["state_province_name"], r["city"])
 
-            # ---- dimensões de produto (1 linha por produto)
-            pname = row['product_name']
-            if pname not in d_prod.idx:
-                d_prod.get(pname)
-                products.append([
-                    pname,
-                    d_subcat.get(row['subcategory_name'] or 'Sem subcategoria'),
-                    d_cat.get(row['category_name'] or 'Sem categoria'),
-                ])
-            prod_idx = d_prod.idx[pname]
+    # ---- dicionários (ordenados para a saída ser determinística)
+    dates, date_ix = index_of({r["order_date"] for r in rows})
+    categories, cat_ix = index_of({r["category_name"] for r in rows})
+    subcategories, sub_ix = index_of({r["subcategory_name"] for r in rows})
+    customer_types, ctype_ix = index_of({r["customer_type"] for r in rows})
+    card_types, card_ix = index_of({r["card_type"] for r in rows})
+    statuses, status_ix = index_of({r["status_name"] for r in rows})
+    countries, country_ix = index_of({r["country_region_name"] for r in rows})
+    states, state_ix = index_of({r["state_province_name"] for r in rows})
+    reasons, reason_ix = index_of({x for r in rows for x in r["_reasons"]})
 
-            # ---- pedido (atributos constantes por pedido)
-            oid = int(row['sales_order_id'])
-            o_idx = order_index.get(oid)
-            if o_idx is None:
-                cname = row['customer_name'] or '(cliente sem nome)'
-                if cname not in d_cust.idx:
-                    d_cust.get(cname)
-                    customers.append([cname, d_ctype.get(row['customer_type'])])
-                geo_key = (row['city'], row['state_province_name'], row['country_region_name'])
-                if geo_key not in d_geo.idx:
-                    d_geo.get(geo_key)
-                    geos.append([
-                        row['city'],
-                        d_state.get(row['state_province_name']),
-                        d_country.get(row['country_region_name']),
-                    ])
-                mask = 0
-                reasons_txt = row['sales_reasons']
-                if reasons_txt and reasons_txt != 'Sem motivo informado':
-                    for r in reasons_txt.split(', '):
-                        mask |= 1 << d_reason.get(r)
-                o_idx = len(orders)
-                order_index[oid] = o_idx
-                orders.append([
-                    d_date.get(row['order_date']),
-                    oid,
-                    d_cust.idx[cname],
-                    d_card.get(row['card_type']),
-                    d_status.get(row['status_name']),
-                    d_geo.idx[geo_key],
-                    mask,
-                ])
+    prod_info, cust_info = {}, {}
+    for r in rows:
+        prod_info.setdefault(r["_prod"], (r["product_name"], r["subcategory_name"], r["category_name"]))
+        cust_info.setdefault(r["_cust"], (r["customer_name"], r["customer_type"]))
+    prod_keys = sorted(prod_info, key=lambda k: (prod_info[k][0], str(k)))
+    cust_keys = sorted(cust_info, key=lambda k: (cust_info[k][0], str(k)))
+    prod_ix = {k: i for i, k in enumerate(prod_keys)}
+    cust_ix = {k: i for i, k in enumerate(cust_keys)}
+    products = [[prod_info[k][0], sub_ix[prod_info[k][1]], cat_ix[prod_info[k][2]], k if has_ids else None]
+                for k in prod_keys]
+    customers = [[cust_info[k][0], ctype_ix[cust_info[k][1]], k if has_ids else None] for k in cust_keys]
 
-            # ---- linha (item de pedido)
-            gross = Decimal(row['gross_amount'])
-            if row['order_date'].startswith('2011'):
-                gross_2011 += gross
-            lines.append([
-                o_idx,
-                prod_idx,
-                int(row['order_qty']),
-                num(row['gross_amount']),
-                num(row['net_amount']),
-            ])
+    geo_keys, geo_ix = index_of({r["_geo"] for r in rows})
+    geos = [[city, state_ix[state], country_ix[country]] for (country, state, city) in geo_keys]
+
+    # ---- pedidos e itens, ordenados por pedido (o painel conta pedidos distintos
+    #      varrendo os itens em sequência)
+    rows.sort(key=lambda r: (r["sales_order_id"], prod_ix[r["_prod"]]))
+    orders, order_ix, lines = [], {}, []
+    for r in rows:
+        oid = r["sales_order_id"]
+        o = order_ix.get(oid)
+        if o is None:
+            mask = 0
+            for name in r["_reasons"]:
+                mask |= 1 << reason_ix[name]
+            o = order_ix[oid] = len(orders)
+            orders.append([date_ix[r["order_date"]], oid, cust_ix[r["_cust"]], card_ix[r["card_type"]],
+                           status_ix[r["status_name"]], geo_ix[r["_geo"]], mask])
+        lines.append([o, prod_ix[r["_prod"]], int(r["order_qty"]),
+                      number(r["gross_amount"]), number(r["net_amount"])])
+
+    gross_total = math.fsum(l[3] for l in lines)
+    gross_2011 = math.fsum(l[3] for l in lines if dates[orders[l[0]][0]].startswith("2011"))
+    exported_at = datetime.fromtimestamp(os.path.getmtime(src)).strftime("%Y-%m-%d")
 
     out = {
-        'meta': {
-            'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-            'source': 'fea_academy.dbt_arthur.rpt_sales (dbt mart)',
-            'rows': len(lines),
-            'orders': len(orders),
-            'gross_2011': float(gross_2011.quantize(Decimal('0.01'))),
+        "meta": {
+            "source": "fea_academy.dbt_arthur.rpt_sales (tabela de consumo do dbt)",
+            "exported_at": exported_at,
+            "rows": len(lines),
+            "orders": len(orders),
+            "gross_total": round(gross_total, 2),
+            "gross_2011": round(gross_2011, 2),
+            "identity": "id" if has_ids else "name",
         },
-        'dates': d_date.vals,
-        'categories': d_cat.vals,
-        'subcategories': d_subcat.vals,
-        'products': products,
-        'customer_types': d_ctype.vals,
-        'customers': customers,
-        'card_types': d_card.vals,
-        'statuses': d_status.vals,
-        'countries': d_country.vals,
-        'states': d_state.vals,
-        'geos': geos,
-        'reasons': d_reason.vals,
-        'orders': orders,
-        'lines': lines,
+        "dates": dates,
+        "categories": categories,
+        "subcategories": subcategories,
+        "products": products,
+        "customer_types": customer_types,
+        "customers": customers,
+        "card_types": card_types,
+        "statuses": statuses,
+        "countries": countries,
+        "states": states,
+        "geos": geos,
+        "reasons": reasons,
+        "orders": orders,
+        "lines": lines,
     }
 
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    with open(dst, 'w', encoding='utf-8') as f:
-        json.dump(out, f, ensure_ascii=False, separators=(',', ':'))
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    with open(dst, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
 
-    size_mb = os.path.getsize(dst) / 1e6
-    print(f"ok: {len(lines)} linhas, {len(orders)} pedidos, {len(products)} produtos, "
-          f"{len(customers)} clientes, {len(geos)} geografias, {len(d_reason.vals)} motivos")
-    print(f"vendas brutas 2011 = {out['meta']['gross_2011']:,.2f}")
-    print(f"arquivo: {dst} ({size_mb:.1f} MB)")
+    print(f"itens de pedido: {len(lines):,} | pedidos: {len(orders):,} | produtos: {len(products):,} | "
+          f"clientes: {len(customers):,} | cidades: {len(geos):,} | motivos: {len(reasons)}")
+    print(f"valor bruto total: {gross_total:,.2f} | vendas brutas 2011: {gross_2011:,.2f}")
+    print(f"identidade de cliente e produto: {'ID do ERP' if has_ids else 'nome (extração sem IDs)'}")
+    print(f"arquivo: {dst} ({os.path.getsize(dst) / 1e6:.1f} MB) | extração de {exported_at}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     main(sys.argv[1], sys.argv[2])

@@ -11,6 +11,7 @@ da diretoria.
 | Projeto dbt: staging, marts, testes e documentação | [adventureworks_dbt/](adventureworks_dbt/) |
 | SQL de apoio das perguntas de negócio | [adventureworks_dbt/analyses/](adventureworks_dbt/analyses/) |
 | Painel de BI | <https://arthur-eiji.github.io/CEA_AW_ArthurEiji/> |
+| Vídeo de apresentação (9 min) | <https://youtu.be/osQUnATmJE0> |
 
 ## Arquitetura
 
